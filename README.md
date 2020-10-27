@@ -6,7 +6,7 @@ This repository contains the MATLAB codes used for data processing and simulatio
 The software available in this repository is licensed under a
 Creative Commons Attribution-NonCommercial 4.0 International License. If you use codes from this repository for your work, please provide reference to the article
 
-* Nozari A, Bertolero M A, Cornblath E J, Mahadevan A, Caciagli L, He X, Pappas G J, and Bassett D S, "Is the brain macroscopically linear? A system identification of resting state dynamics", 2020.
+* Nozari A, Stiso J, Caciagli L, Cornblath E J, He X, Bertolero M A, Mahadevan A, Pappas G J, and Bassett D S, "Is the brain macroscopically linear? A system identification of resting state dynamics", 2020.
 
 ## External packages and files:
 
