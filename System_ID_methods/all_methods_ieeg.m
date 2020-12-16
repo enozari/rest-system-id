@@ -219,7 +219,7 @@ for i_exec = exec_order                                                     % Ru
 end
 
 %% Choosing the best model (among all but pairwise methods)
-if nargout >= 9
+if nargout >= 7
     R2_cmp = zeros(n_method);
     for i_method = 1:n_method
         for j_method = setdiff(1:n_method, i_method)
