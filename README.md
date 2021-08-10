@@ -6,13 +6,13 @@ This repository contains the MATLAB codes used for data processing and simulatio
 The software available in this repository is licensed under a
 Creative Commons Attribution-NonCommercial 4.0 International License. If you use codes from this repository for your work, please provide reference to the article
 
-* Nozari A, Stiso J, Caciagli L, Cornblath E J, He X, Bertolero M A, Mahadevan A, Pappas G J, and Bassett D S, "Is the brain macroscopically linear? A system identification of resting state dynamics", 2020.
+* Nozari A, Bertolero M A, Stiso J, Caciagli L, Cornblath E J, He X, Mahadevan A, Pappas G J, and Bassett D S, "Is the brain macroscopically linear? A system identification of resting state dynamics", 2021.
 
 ## External packages and files:
 
 The following MATLAB packages should be downloaded and installed (added to MATLAB path using the addpath() function) before running the codes in this repository:
 
-* MINDy package for neural mass model identification, available at https://github.com/singhmf/MINDy-Beta
+* MINDy package for neural mass model identification, available at https://github.com/singhmf/MINDy
 * MATLAB distributionPlot package, available at https://www.mathworks.com/matlabcentral/fileexchange/23661-violin-plots-for-plotting-multiple-distributions-distributionplot-m
 * MATLAB Hatchfill package, available at https://www.mathworks.com/matlabcentral/fileexchange/30733-hatchfill
 * MATLAB Arrow3 package, available at https://www.mathworks.com/matlabcentral/fileexchange/14056-arrow3
@@ -24,4 +24,4 @@ Also, the following files need to be downloaded and available to the MATLAB func
 * The parcel specifications for the Schaefer 100x7 parcellation, available at https://github.com/ThomasYeoLab/CBIG/blob/master/stable_projects/brain_parcellation/Schaefer2018_LocalGlobal/Parcellations/MNI/Schaefer2018_100Parcels_7Networks_order.txt
 * Color codes for the 7 resting state networks, available at https://github.com/jimmyshen007/NeMo/blob/master/resource/Atlasing/Yeo_JNeurophysiol11_MNI152/Yeo2011_7Networks_ColorLUT.txt
 
-Finally, the file main_fmri.m assumes that preprocessed HCP S1200 rsfMRI time series are available in an 'HCP' subdirectory. The data is not included in this distribution but is publicly available at https://db.humanconnectome.org and our preprocessing pipeline is described in the Methods section of the above reference. Similarly, the file main_ieeg.m assumes that preprocessed RAM rsiEEG time series are available in the rs_5min/rand_segments subdirectory, which are not included in this distribution but publicly available at http://memory.psych.upenn.edu/RAM.
+Finally, the file main_fmri.m assumes that preprocessed HCP S1200 rsfMRI time series are available in an 'HCP' subdirectory. The data is not included in this distribution but is publicly available at https://db.humanconnectome.org and our preprocessing pipeline is described in the Methods section of the above reference. Similarly, the file main_ieeg.m assumes that preprocessed RAM rsiEEG time series are available in the rs_5min/rand_segments_xxx subdirectory, for xxx = 1, 5, and 25. These are not included in this distribution but are publicly available at http://memory.psych.upenn.edu/RAM (modulo a simple subsampling required for the xxx = 5, 25).

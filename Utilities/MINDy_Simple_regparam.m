@@ -1,34 +1,33 @@
-function[Out,Wfin,Dfin]=MINDy_Simple_regparam(Dat,isDnSampDeriv,TR,varargin)
-%MINDY_SIMPLE_REGPARAM Same as MINDy_Simple in the original
-% MINDy-Beta-master distribution except that the regularization parameters
-% are accepted as input to be tunable.
+function[Out,Wfin,Dfin]=MINDy_Simple_regparam(Dat,TR,isDnSampDeriv,varargin)
+% Same as MINDy in the original MINDy distribution, except that the
+% regularization parameters are accepted as input to be tunable
 
-
-%% Optional additional outputs Wfin and Dfin just extract W (Out.Param{5}) and...
-%% D (Out.Param{6}) from the output.
-
-if (nargin==1)||isempty(isDnSampDeriv)
-    disp('Assuming 2-TR derivative')
+%% Just Input Data as region x time (a single matrix or cell of matrices)
+%% IsDnSampDeriv denotes whether to take the one step derivative ('n') or...
+%% 2-step derivative: x(t+2)-x(t)/2 ('y'/default)
+%% varargin denotes whether to do preprocessing (filter and deconvolution) ('y' is default)
+if isempty(isDnSampDeriv)
     isDnSampDeriv='y';
 end
 
-if (nargin<3)||isempty(TR)
-    %% Assumed HCP TR by default
-    disp('Assuming HCP TR=.72s')
-    TR=.72;
-end
 
 %% Output.Param={Wsparse,A,b,c,Wfull,D}
 %% optional second and third outputs give Wfull and D
 
 %% Optional input argument is whether to do preprocessing (filtering and deconvolution)
-ChosenPARSTR;
-
-if numel(varargin) >= 1
-    doPreProc=varargin{1};
-else
+if isempty(varargin)
     doPreProc='y';
+else
+    doPreProc=varargin{1};
 end
+
+ChosenPARSTR;
+ParStr.BatchSz=300;ParStr.NBatch=5000;
+doRobust='n';
+Pre.TR=TR;
+
+ParStr.H1min=5;ParStr.H1max=7;ParStr.H2min=.7;ParStr.H2max=1.3;ParStr.H1Rate=.1;ParStr.H2Rate=.1;
+ParStr.L2SpPlsEN=0;
 
 if numel(varargin) >= 2
     ParStr.SpScale = varargin{2};
@@ -44,20 +43,18 @@ if numel(varargin) >= 5
     ParStr.L2SpPlsEN = varargin{5};
 end
 
-ParStr.BatchSz=300;ParStr.NBatch=5000;
-doRobust='n';
-
-Pre.TR=TR;
-
-ParStr.H1min=5;ParStr.H1max=7;ParStr.H2min=.7;ParStr.H2max=1.3;ParStr.H1Rate=.1;ParStr.H2Rate=.1;
-% ParStr.L2SpPlsEN=0;
-
 if ~iscell(Dat)
 Dat={Dat};
 end
 for i=1:numel(Dat)
 Dat{i}=Dat{i}(:,~isnan(sum(Dat{i},1)));
 end
+
+
+%% Rescale dimensions of low-rank component proportionately to the number of parcels
+nX=size(Dat{1},1);
+%% 419 parcels in the original MINDy papers
+ParStr.wPC=ceil(ParStr.wPC*nX/419);
 
 
 Dat=cellfun(@(xx)(zscore(xx')'),Dat,'UniformOutput',0);
@@ -74,8 +71,6 @@ Dat=cellfun(@(xx)(xx(:,1:end-2)),Dat,'UniformOutput',0);
 elseif strcmpi(isDnSampDeriv(1),'n')
 dDat=cellfun(@(xx)(convn(xx,[1 -1],'valid')),Dat,'UniformOutput',0);
 Dat=cellfun(@(xx)(xx(:,1:end-1)),Dat,'UniformOutput',0);
-else
-    error('isDnSampDeriv should be (y) [default] or (n)')
 end
 
 Out=MINDy_Base(Dat,dDat,Pre,ParStr);
@@ -88,7 +83,7 @@ Out=MakeMINDyFunction(Out);
 
 %% Recalculate goodness-of-fit
 Out.Corr=DiagCorr(Out.FastFun([X1{:}])',[dX1{:}]');
-Out=rmfield(Out,{'FastFun','Tran'});
+% Out=rmfield(Out,{'FastFun','Tran'});
 Out.Pre=Pre;Out.ParStr=ParStr;
 Wfin=Out.Param{5};Dfin=Out.Param{6};
 end

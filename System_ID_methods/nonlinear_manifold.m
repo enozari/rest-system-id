@@ -1,4 +1,4 @@
-function [model, R2, whiteness_p, Y_hat] = nonlinear_manifold(Y, n_AR_lags, kernel, h, test_range)
+function [model, R2, whiteness, Y_hat] = nonlinear_manifold(Y, n_AR_lags, kernel, h, scale_h, test_range)
 %NONLINEAR_MANIFOLD Fitting and cross-validating a nonlinear model using
 % locally linear approximation of its vector field
 %
@@ -17,6 +17,15 @@ function [model, R2, whiteness_p, Y_hat] = nonlinear_manifold(Y, n_AR_lags, kern
 %   local the model is. h -> infinity makes the model equivalent to a
 %   (globally) linear model.
 % 
+%   scale_h: struct determining whether and how to scale the window size h.
+%   the filed scale_h.do_scale is mandatory and is a binary flag indicating
+%   whether h should be re_scaled using the data at hand. If true, then a
+%   second field scale_h.base_med_dist is also required, including the
+%   median distance between all pairs of training and test samples in the
+%   original data set over which the value of h has been selected. The
+%   algorithm then adjusts h using the median distance between all pairs of
+%   training and test samples in the current data (Y).
+% 
 %   test_range: a sub-interval of [0, 1] indicating the portion of Y that
 %   is used for test (cross-validation). The rest of Y is used for
 %   training.
@@ -29,8 +38,9 @@ function [model, R2, whiteness_p, Y_hat] = nonlinear_manifold(Y, n_AR_lags, kern
 %   R2: an n x 1 vector containing the cross-validated prediction R^2 of
 %   the n channels.
 % 
-%   whiteness_p: an n x 1 vector containing the p-values of the chi-squared
-%   test of whiteness for the cross-validated residuals of each channel.
+%   whiteness: a struct containing the statistic (Q) and the
+%   randomization-basd significance threshold and p-value of the
+%   multivariate whiteness test.
 % 
 %   Y_hat: a cell array the same size as Y but for cross-validated one-step
 %   ahead predictions using the fitted model. This is only meaningful for
@@ -40,7 +50,7 @@ function [model, R2, whiteness_p, Y_hat] = nonlinear_manifold(Y, n_AR_lags, kern
 %   data is available. Therefore, the first column of all elements of Y_hat
 %   are also NaNs, regardless of being a training or a test time point.
 % 
-%   Copyright (C) 2020, Erfan Nozari
+%   Copyright (C) 2021, Erfan Nozari
 %   All rights reserved.
 
 if nargin < 2 || isempty(n_AR_lags)
@@ -62,7 +72,10 @@ end
 if nargin < 4 || isempty(h)
     h = 1e4;
 end
-if nargin < 5 || isempty(test_range)
+if nargin < 5 || isempty(scale_h)
+    scale_h.do_scale = false;
+end
+if nargin < 6 || isempty(test_range)
     test_range = [0.8 1];
 end
            
@@ -87,15 +100,22 @@ N_test = size(Y_test_lags, 2);
 %% Least squares
 switch kernel
     case 'Gaussian'
-        K_h = @(d)1/sqrt(2*pi)/h * exp(-d.^2/2/h^2);                        % Window function, giving the weight of each point as a function of its distance d from the testing point of interest.
+        K_h = @(d, h)1/sqrt(2*pi)/h * exp(-d.^2/2/h^2);                        % Window function, giving the weight of each point as a function of its distance d from the testing point of interest.
     case 'Epanechnikov'
-        K_h = @(d)3/4/h * max(1-d.^2/h^2, 0);
+        K_h = @(d, h)3/4/h * max(1-d.^2/h^2, 0);
+end
+
+if scale_h.do_scale
+    h_orig = h;
 end
 
 try
     Phi = [ones(1, N_train, N_test); Y_train_lags - permute(Y_test_lags, [1 3 2])]; % Matrix of regressors
     dist = permute(sqrt(sum(Phi(2:end, :, :).^2, 1)), [3 2 1]);                 % Pairwise Euclidean distance
-    K = K_h(dist);
+    if scale_h.do_scale
+        h = h_orig * median(dist(:)) / scale_h.base_med_dist;
+    end
+    K = K_h(dist, h);
     low_memory = 0;
 catch ME
     if any(strcmp(ME.identifier, {'MATLAB:array:SizeLimitExceeded', 'MATLAB:nomem'}))
@@ -113,7 +133,10 @@ for i_test = 1:N_test
     else
         Phi_i_test = [ones(1, N_train); Y_train_lags - Y_test_lags(:, i_test)]; % Matrix of regressors
         dist_i_test = sqrt(sum(Phi_i_test(2:end, :).^2, 1));                              % Pairwise Euclidean distance
-        K_i_test = K_h(dist_i_test);
+        if scale_h.do_scale
+            h = h_orig * median(dist_i_test) / scale_h.base_med_dist;
+        end
+        K_i_test = K_h(dist_i_test, h);
         G = Phi_i_test * diag(K_i_test) * Phi_i_test';
         g = Y_train_diff * diag(K_i_test) * Phi_i_test';
     end
@@ -137,4 +160,4 @@ end
 Y_test_plus = cell2mat(cellfun(@(Y)Y(:, 1+max(1, n_AR_lags):end), Y_test_cell, 'UniformOutput', 0));
 E_test = Y_test_plus_hat - Y_test_plus;                                     % Prediction error
 R2 = 1 - sum(E_test.^2, 2) ./ sum((Y_test_plus - mean(Y_test_plus, 2)).^2, 2);
-whiteness_p = my_whitetest(E_test');
+[whiteness.p, whiteness.stat, whiteness.sig_thr] = my_whitetest_multivar(E_test);

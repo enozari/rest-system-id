@@ -1,15 +1,14 @@
 function Y_test = LL_est(X_train, Y_train, X_test, kernel, h)
 %LL_EST Locally linear estimation, based on the algorithm in
-% J. Roll, \Local and piecewise ane approaches to system identification,"
-% Ph.D. dissertation, Linkoping University, 2003.
+% J. Roll, \Local and piecewise affine approaches to system
+% identification," Ph.D. dissertation, Linkoping University, 2003.
 %
 %   Y_test = LL_est(X_train, Y_train, X_test) returns a matrix (or column
 %   vector) the same size as X_test containing the best prediction of the
 %   corresponding output values based on a locally linear model learned
-%   from (X_train, Y_train). The latter should have the same size and the
-%   same number of columns as X_test. Their number of rows equals the
-%   number of training observations while the number of rows of X_test give
-%   the number of test observations.
+%   from (X_train, Y_train). The latter should have the same number of
+%   rows, and X_train must have the same number of columns as X_test. Time
+%   (observations) is along the first axis.
 % 
 %   Y_test = LL_est(X_train, Y_train, X_test, kernel) also determines which
 %   kernel should be used for determining which training points are close

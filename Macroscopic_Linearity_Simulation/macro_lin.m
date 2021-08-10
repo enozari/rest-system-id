@@ -55,7 +55,7 @@ end
 
 % Adding the parent directory and its sub-directories to the path
 full_filename = mfilename('fullpath');
-addpath(genpath(full_filename(1:strfind(full_filename, 'Macroscopic Linearity Simulation')-2)))
+addpath(genpath(full_filename(1:strfind(full_filename, 'Macroscopic_Linearity_Simulation')-2)))
 
 %% Variables applicable to all cases of sweep
 nonlin_map = @tahh;
@@ -200,7 +200,7 @@ switch sweep
         filter = [0, filter_half, fliplr(filter_half(1:end-1))];
         white_sig = randn(1, N_gen);                                        % White signal that will be filtered using filter to generate original (before lowpass filtering) x
         colored_sig = real(ifft(fft(white_sig) .* filter));
-        colored_sig = colored_sig(fix(end*0.2)+(1:N));                      % Avoiding edge effects
+        colored_sig = colored_sig(fix(end*0.45)+(1:N));                      % Avoiding edge effects
         x = (colored_sig - min(colored_sig)) / (max(colored_sig) - min(colored_sig)) * (x_range(2) - x_range(1)) + x_range(1); % Linearly mapping colored_sig to x_range
         y = nonlin_map(x);
         
@@ -227,7 +227,6 @@ switch sweep
             end
             f_bandwidth_post = min(10*fpass, f_bandwidth_pre);
             ss_ratio = floor(1 / f_bandwidth_post);
-            sig_out = sig_out(1:ss_ratio:end);
             x_rec{i_fpass} = x_filtered(1:ss_ratio:end);
             y_rec{i_fpass} = y_filtered(1:ss_ratio:end);
             N = numel(x_rec{i_fpass});
@@ -400,8 +399,8 @@ switch sweep
                     h = LL_est_h;
                 end
 
-                y_hat_lin = nan(1, N);
-                y_hat_nonlin = nan(1, N);
+                y_test_hat_lin = nan(1, N);
+                y_test_hat_nonlin = nan(1, N);
                 rand_ind = randperm(N);
                 break_pts = round(linspace(0, N, n_cv+1));
                 for i_cv = 1:n_cv
@@ -412,17 +411,18 @@ switch sweep
                     X_test = X(:, test_ind);
                     N_test = numel(test_ind);
                     y_train = y(train_ind);
+                    y_test = y(test_ind);
 
                     % Linear regression
                     coeffs = lsqminnorm([X_train', ones(N_train, 1)], y_train')';
-                    y_hat_lin(test_ind) = coeffs * [X_test; ones(1, N_test)];
+                    y_test_hat_lin(test_ind) = coeffs * [X_test; ones(1, N_test)];
 
                     % Nonlinear regression                
-                    y_hat_nonlin(test_ind) = LL_est(X_train', y_train', X_test', LL_est_kernel, h)';
+                    y_test_hat_nonlin(test_ind) = LL_est(X_train', y_train', X_test', LL_est_kernel, h)';
                 end
-                R2_denom = sum((y - mean(y)).^2);
-                R2_lin_rec(i_dim) = 1 - sum((y - y_hat_lin).^2) / R2_denom;
-                R2_nonlin_rec(i_dim) = 1 - sum((y - y_hat_nonlin).^2) / R2_denom;
+                R2_denom = sum((y_test - mean(y_test)).^2);
+                R2_lin_rec(i_dim) = 1 - sum((y_test - y_test_hat_lin).^2) / R2_denom;
+                R2_nonlin_rec(i_dim) = 1 - sum((y_test - y_test_hat_nonlin).^2) / R2_denom;
             end
         end
 

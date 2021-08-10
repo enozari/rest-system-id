@@ -1,6 +1,6 @@
-function [model, R2, whiteness_p, Y_hat] = linear_AR(Y, include_W, n_AR_lags, W_mask, use_parallel, test_range)
-%LINEAR_BOLD Fitting and cross-validating various class of linear models
-% directly at the BOLD level.
+function [model, R2, whiteness, Y_hat] = linear_AR(Y, include_W, n_AR_lags, W_mask, use_parallel, test_range)
+%LINEAR_AR Fitting and cross-validating various autoregrssive linear models
+% directly at the signal level.
 %
 %   Input arguments
 % 
@@ -42,8 +42,9 @@ function [model, R2, whiteness_p, Y_hat] = linear_AR(Y, include_W, n_AR_lags, W_
 %   R2: an n x 1 vector containing the cross-validated prediction R^2 of
 %   the n channels.
 % 
-%   whiteness_p: an n x 1 vector containing the p-values of the chi-squared
-%   test of whiteness for the cross-validated residuals of each channel.
+%   whiteness: a struct containing the statistic (Q) and the
+%   randomization-basd significance threshold and p-value of the
+%   multivariate whiteness test.
 % 
 %   Y_hat: a cell array the same size as Y but for cross-validated one-step
 %   ahead predictions using the fitted model. This is only meaningful for
@@ -53,7 +54,7 @@ function [model, R2, whiteness_p, Y_hat] = linear_AR(Y, include_W, n_AR_lags, W_
 %   data is available. Therefore, the first column of all elements of Y_hat
 %   are also NaNs, regardless of being a training or a test time point.
 % 
-%   Copyright (C) 2020, Erfan Nozari
+%   Copyright (C) 2021, Erfan Nozari
 %   All rights reserved.
 
 if nargin < 2 || isempty(include_W)
@@ -290,7 +291,7 @@ end
 
 E_test = Y_test_plus_hat - Y_test_plus;                                     % Prediction error
 R2 = 1 - sum(E_test.^2, 2) ./ sum((Y_test_plus - mean(Y_test_plus, 2)).^2, 2);
-whiteness_p = my_whitetest(E_test');
+[whiteness.p, whiteness.stat, whiteness.sig_thr] = my_whitetest_multivar(E_test);
 end
 
 %% Auxiliary Functions

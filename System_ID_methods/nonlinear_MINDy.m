@@ -1,4 +1,4 @@
-function [model, R2, whiteness_p, Y_hat] = nonlinear_MINDy(Y, TR, doPreProc, lambda, use_parallel, ...
+function [model, R2, whiteness, Y_hat] = nonlinear_MINDy(Y, TR, doPreProc, lambda, use_parallel, ...
     test_range)
 %NONLINEAR_MINDY Fitting and cross-validating a nonlinear neural mass model
 % using the MINDy algorithm presented in:
@@ -32,8 +32,9 @@ function [model, R2, whiteness_p, Y_hat] = nonlinear_MINDy(Y, TR, doPreProc, lam
 %   R2: an n x 1 vector containing the cross-validated prediction R^2 of
 %   the n channels.
 % 
-%   whiteness_p: an n x 1 vector containing the p-values of the chi-squared
-%   test of whiteness for the cross-validated residuals of each channel.
+%   whiteness: a struct containing the statistic (Q) and the
+%   randomization-basd significance threshold and p-value of the
+%   multivariate whiteness test.
 % 
 %   Y_hat: a cell array the same size as Y but for cross-validated one-step
 %   ahead predictions using the fitted model. This is only meaningful for
@@ -43,7 +44,7 @@ function [model, R2, whiteness_p, Y_hat] = nonlinear_MINDy(Y, TR, doPreProc, lam
 %   data is available. Therefore, the first column of all elements of Y_hat
 %   are also NaNs, regardless of being a training or a test time point.
 % 
-%   Copyright (C) 2020, Erfan Nozari
+%   Copyright (C) 2021, Erfan Nozari
 %   All rights reserved.
 
 if nargin < 2 || isempty(TR)
@@ -68,8 +69,7 @@ end
 [Y_train_cell, Y_test_cell, break_ind, test_ind, N_test_vec, n, N] = tt_decomp(Y, test_range);
 
 %% Model fitting
-addpath(genpath('MINDy-Beta-master'));
-[~, MINDy_Out] = evalc('MINDy_Simple_regparam(Y_train_cell, [], TR, doPreProc, lambda{:})');    % Use of evalc prevents output written to workspace from MINDy_Simple.
+MINDy_Out = MINDy_Simple_regparam(Y_train_cell, TR, [], doPreProc, lambda{:});
 
 if isequal(doPreProc, 'y')
     model.eq = ['$$x(t) - x(t-1) = (W \psi_\alpha(x(t-1)) - D x(t-1)) \Delta T + e_1(t) \\ ' ...
@@ -98,23 +98,33 @@ end
 n_test = numel(Y_test_cell);
 Y_test_hat_cell = arrayfun(@(N_test)nan(n, N_test), N_test_vec, 'UniformOutput', 0);
 if isequal(doPreProc, 'y')                                                  % In this case since Wiener deconvlution with the nominal HRF is applied, one step ahead prediction should first be done at the level of internal states (which in turn need to be estimated first using HRF_deconv) and then mapped to output Y using the forward convolution with the same nominal HRF.
+    H1 = 6;
+    H2 = 1;
+    h_HRF = MINDy_MakeHRF_H1H2(H1, H2);
+    HRF_deconv_SNR = 0.02;
     for i_test = 1:n_test                                                   % Iterating over each testing segment separately since testing segments are by assumption not from continuous recordings
         Y_test = Y_test_cell{i_test};
         N_test = N_test_vec(i_test);
         Y_test_hat = nan(n, N_test);
         if use_parallel
-            parfor t = 1:N_test-1
-                X_test_hat_1tot = HRF_deconv([zeros(n, 2-t) Y_test(:, 1:t)], TR); % Wiener deconvolution, as used in MINDy
-                MINDyInt_Out = MINDyInt(MINDy_Out, X_test_hat_1tot(:, end-1), 1, TR, 0, TR, 0); % One step ahead prediction of state
-                X_test_hat_1tot(:, end) = MINDyInt_Out(:, 2);               % The estimate of the last column of X_test_hat_1tot, corresponding to time t, based on deconvolution should be discarded (because HRF_impulse_resp has a delay of 1, i.e., is nonzero from time 1 not from time 0) and estimated from the previous column using one step ahead prediction
-                Y_test_hat(:, t+1) = sum(fliplr(HRF_impulse_resp{i_test}(1:size(X_test_hat_1tot, 2))) .* X_test_hat_1tot, 2); % Convolution with the same nominal HRF used in MINDy
+            parfor t = 2:N_test
+                H_HRF = fft(h_HRF(TR * (0:t-2)), [], 2);
+                X_test_hat_1totm1 = real(ifft(fft(Y_test(:, 1:t-1), [], 2) ... .*
+                    .* (conj(H_HRF) ./ (HRF_deconv_SNR + abs(H_HRF).^2)), [] ,2));
+                X1_test_hat_2tot = MINDy_Out.Param{5} * MINDy_Out.Tran(X_test_hat_1totm1);
+                Y1_test_hat_2tot = real(ifft(fft(X1_test_hat_2tot, [], 2) .* H_HRF, [], 2));
+                Y_test_hat(:, t) = Y1_test_hat_2tot(:, end) ... +
+                    + (1 - MINDy_Out.Param{6}) .* Y_test(:, t-1);  
             end
         else
-            for t = 1:N_test-1
-                X_test_hat_1tot = HRF_deconv([zeros(n, 2-t) Y_test(:, 1:t)], TR);
-                MINDyInt_Out = MINDyInt(MINDy_Out, X_test_hat_1tot(:, end-1), 1, TR, 0, TR, 0);
-                X_test_hat_1tot(:, end) = MINDyInt_Out(:, 2);
-                Y_test_hat(:, t+1) = sum(fliplr(HRF_impulse_resp{i_test}(1:size(X_test_hat_1tot, 2))) .* X_test_hat_1tot, 2);
+            for t = 2:N_test
+                H_HRF = fft(h_HRF(TR * (0:t-2)), [], 2);
+                X_test_hat_1totm1 = real(ifft(fft(Y_test(:, 1:t-1), [], 2) ... .*
+                    .* (conj(H_HRF) ./ (HRF_deconv_SNR + abs(H_HRF).^2)), [] ,2));
+                X1_test_hat_2tot = MINDy_Out.Param{5} * MINDy_Out.Tran(X_test_hat_1totm1);
+                Y1_test_hat_2tot = real(ifft(fft(X1_test_hat_2tot, [], 2) .* H_HRF, [], 2));
+                Y_test_hat(:, t) = Y1_test_hat_2tot(:, end) ... +
+                    + (1 - MINDy_Out.Param{6}) .* Y_test(:, t-1);  
             end
         end
         Y_test_hat_cell{i_test} = Y_test_hat;
@@ -122,8 +132,8 @@ if isequal(doPreProc, 'y')                                                  % In
 else                                                                        % In this case the model runs directly on the output (the state and output are the same) and therefore one step ahead prediction can be directly obtained by running the neural mass model forwared.
     for i_test = 1:n_test
         Y_test = Y_test_cell{i_test};
-        MINDyInt_Out = MINDyInt(MINDy_Out, Y_test(:, 1:end-1), 1, TR, 0, TR, 0);
-        Y_test_hat = [nan(n, 1), squeeze(MINDyInt_Out(:, 2, :))];
+        Y_test_plus_hat = Y_test(:, 1:end-1) + MINDy_Out.FastFun(Y_test(:, 1:end-1));
+        Y_test_hat = [nan(n, 1), Y_test_plus_hat];
         Y_test_hat_cell{i_test} = Y_test_hat;
     end
 end
@@ -133,7 +143,7 @@ Y_test_hat_full = cell2mat(Y_test_hat_cell);
 nan_ind = any(isnan(Y_test_hat_full));                                      % Index of time points at which a cross-validated prediction is not available, either because they correspond to training samples, or they are the first sample of their recording
 E_test = Y_test_hat_full(:, ~nan_ind) - Y_test_full(:, ~nan_ind);           % (Output) prediction error
 R2 = 1 - sum(E_test.^2, 2) ./ sum((Y_test_full(:, ~nan_ind) - mean(Y_test_full(:, ~nan_ind), 2)).^2, 2);
-whiteness_p = my_whitetest(E_test');
+[whiteness.p, whiteness.stat, whiteness.sig_thr] = my_whitetest_multivar(E_test);
 
 Y_hat = [nan(n, test_ind(1)), Y_test_hat_full, nan(n, N-test_ind(end))];    % Appending Y_test_hat with NaNs before and after corresponding to training time points.
 if iscell(Y)

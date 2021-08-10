@@ -1,6 +1,6 @@
-function [model, R2, whiteness_p, Y_hat] = linear_pairwise(Y, use_parallel, test_range)
+function [model, R2, whiteness, Y_hat] = linear_pairwise(Y, use_parallel, test_range)
 %LINEAR_PAIRWISE Fitting and cross-validating simple pairwise linear
-% regression models directly at the BOLD level.
+% regression models directly at the signal level.
 %
 %   Input arguments
 % 
@@ -24,8 +24,8 @@ function [model, R2, whiteness_p, Y_hat] = linear_pairwise(Y, use_parallel, test
 %   R2: an n x 1 vector containing the cross-validated prediction R^2 of
 %   the n channels.
 % 
-%   whiteness_p: an n x 1 vector containing the p-values of the chi-squared
-%   test of whiteness for the cross-validated residuals of each channel.
+%   whiteness: a struct containing the matrix of statistics and chi-squared
+%   p-values of the univariate whiteness tests for each pair of channels.
 % 
 %   Y_hat: a cell array the same size as Y but for cross-validated one-step
 %   ahead predictions using the fitted model. This is only meaningful for
@@ -35,7 +35,7 @@ function [model, R2, whiteness_p, Y_hat] = linear_pairwise(Y, use_parallel, test
 %   data is available. Therefore, the first column of all elements of Y_hat
 %   are also NaNs, regardless of being a training or a test time point.
 % 
-%   Copyright (C) 2020, Erfan Nozari
+%   Copyright (C) 2021, Erfan Nozari
 %   All rights reserved.
 
 if nargin < 2 || isempty(use_parallel)
@@ -71,12 +71,15 @@ E_test = Y_test_plus_hat - Y_test_plus;
 R2 = permute(1 - sum((E_test).^2, 2) ./ sum((Y_test_plus - mean(Y_test_plus, 2)).^2, 2), [1 3 2]); % Since this is a pairwise method, R2 is a matrix, whose (i, j) entry is the R2 of predicting y_i(t) from y_j(t-1)
 
 whiteness_p = nan(n);                                                       % This is also a matrix similar to R2
+whiteness_stat = nan(n);
 if use_parallel
     parfor j = 1:n
-        whiteness_p(:, j) = my_whitetest(E_test(:, :, j)');
+        [whiteness_p(:, j), whiteness_stat(:, j)] = my_whitetest(E_test(:, :, j));
     end
 else
     for j = 1:n
-        whiteness_p(:, j) = my_whitetest(E_test(:, :, j)');
+        [whiteness_p(:, j), whiteness_stat(:, j)] = my_whitetest(E_test(:, :, j));
     end
 end
+whiteness.p = whiteness_p;
+whiteness.stat = whiteness_stat;

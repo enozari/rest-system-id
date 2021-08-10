@@ -1,32 +1,32 @@
-function [p, R] = my_whitetest(x, nlags)
-%MY_WHITETEST chi-squre test of whiteness.
+function [pval, stat] = my_whitetest(E, nlags)
+%MY_WHITETEST chi-squre test of (univariate) whiteness.
 % 
-%   [p, R] = my_whitetest(x) returns the p-value for the chi-squared test
-%   of whiteness of each column of x. R is the corresponding test
-%   statistic. Both p and R are row vectors having as many elements as the
-%   number of rows of x.
+%   [pval, stat] = my_whitetest(E) returns the p-value for the chi-squared
+%   test of whiteness of each row of E. stat is the corresponding test
+%   statistic. Both pval and stat are column vectors having as many
+%   elements as the number of rows of E.
 % 
-%   [p, R] = my_whitetest(x, nlags) additionally determines the number of
-%   lags in the autocorrelation. The default is 20.
+%   [pval, stat] = my_whitetest(E, nlags) additionally determines the
+%   number of lags in the autocorrelation. The default is 20.
 % 
-%   Copyright (C) 2020, Erfan Nozari
+%   Copyright (C) 2021, Erfan Nozari
 %   All rights reserved.
 
 if nargin < 2
     nlags = 20;
 end
 
-if isvector(x)
-    x = x(:);
+if isvector(E)
+    E = E(:)';
 end
 
-[N, n] = size(x);
-p = nan(1, n);
-R = nan(1, n);
+[n, N] = size(E);
+pval = nan(1, n);
+stat = nan(1, n);
 for i = 1:n
-    acf = my_autocorr(x(:, i), nlags);
-    R(i) = N * sum(acf(2:end).^2);
-    p(i) = my_chi2cdf(R(i), nlags, 'upper');
+    acf = my_autocorr(E(i, :)', nlags);
+    stat(i) = N * sum(acf(2:end).^2);
+    pval(i) = my_chi2cdf(stat(i), nlags, 'upper');
 end
 end
 

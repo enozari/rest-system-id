@@ -1,4 +1,4 @@
-function [model, R2, whiteness_p, Y_hat] = linear_neural(Y, TR, n_h, n_phi, n_psi, W_mask, use_parallel, ...
+function [model, R2, whiteness, Y_hat] = linear_neural(Y, TR, n_h, n_phi, n_psi, W_mask, use_parallel, ...
     test_range)
 %LINEAR_NEURAL Fitting and cross-validating a general family of linear
 % models that include a model for the hemodynamic response function (HRF)
@@ -43,8 +43,9 @@ function [model, R2, whiteness_p, Y_hat] = linear_neural(Y, TR, n_h, n_phi, n_ps
 %   R2: an n x 1 vector containing the cross-validated prediction R^2 of
 %   the n channels.
 % 
-%   whiteness_p: an n x 1 vector containing the p-values of the chi-squared
-%   test of whiteness for the cross-validated residuals of each channel.
+%   whiteness: a struct containing the statistic (Q) and the
+%   randomization-basd significance threshold and p-value of the
+%   multivariate whiteness test.
 % 
 %   Y_hat: a cell array the same size as Y but for cross-validated one-step
 %   ahead predictions using the fitted model. This is only meaningful for
@@ -54,7 +55,7 @@ function [model, R2, whiteness_p, Y_hat] = linear_neural(Y, TR, n_h, n_phi, n_ps
 %   data is available. Therefore, the first column of all elements of Y_hat
 %   are also NaNs, regardless of being a training or a test time point.
 % 
-%   Copyright (C) 2020, Erfan Nozari
+%   Copyright (C) 2021, Erfan Nozari
 %   All rights reserved.
 
 if nargin < 2 || isempty(TR)
@@ -196,7 +197,7 @@ model.Phi = Phi_rec(:, :, best_EM_iter);
 model.n_psi = n_psi;
 model.Psi = Psi_rec(:, :, best_EM_iter);
 
-whiteness_p = my_whitetest(E_test_rec{best_EM_iter}');
+[whiteness.p, whiteness.stat, whiteness.sig_thr] = my_whitetest_multivar(E_test_rec{best_EM_iter});
 Y_test_hat_full = cell2mat(cellfun(@(Y)Y(:, :, best_EM_iter), Y_test_hat_rec, 'UniformOutput', 0));
 Y_hat = [nan(n, test_ind(1)), Y_test_hat_full, nan(n, N-test_ind(end))];
 if iscell(Y)

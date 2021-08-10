@@ -1,4 +1,4 @@
-function [model, R2, whiteness_p, Y_hat] = linear_subspace(Y, s, r, n, test_range)
+function [model, R2, whiteness, Y_hat] = linear_subspace(Y, s, r, n, test_range)
 %LINEAR_SUBSPACE Fitting and cross-validating a general linear model in
 % standard state space form using subspace methods. 
 % 
@@ -35,8 +35,9 @@ function [model, R2, whiteness_p, Y_hat] = linear_subspace(Y, s, r, n, test_rang
 %   R2: an n x 1 vector containing the cross-validated prediction R^2 of
 %   the n channels.
 % 
-%   whiteness_p: an n x 1 vector containing the p-values of the chi-squared
-%   test of whiteness for the cross-validated residuals of each channel.
+%   whiteness: a struct containing the statistic (Q) and the
+%   randomization-basd significance threshold and p-value of the
+%   multivariate whiteness test.
 % 
 %   Y_hat: a cell array the same size as Y but for cross-validated one-step
 %   ahead predictions using the fitted model. This is only meaningful for
@@ -46,7 +47,7 @@ function [model, R2, whiteness_p, Y_hat] = linear_subspace(Y, s, r, n, test_rang
 %   data is available. Therefore, the first column of all elements of Y_hat
 %   are also NaNs, regardless of being a training or a test time point.
 % 
-%   Copyright (C) 2020, Erfan Nozari
+%   Copyright (C) 2021, Erfan Nozari
 %   All rights reserved.
 
 if nargin < 2 || isempty(s)
@@ -153,7 +154,7 @@ Y_test_hat_full = cell2mat(Y_test_hat);
 nan_ind = any(isnan(Y_test_hat_full));
 E2_test = Y_test_hat_full(:, ~nan_ind) - Y_test_full(:, ~nan_ind);          % Prediction error
 R2 = 1 - sum(E2_test.^2, 2) ./ sum((Y_test_full(:, ~nan_ind) - mean(Y_test_full(:, ~nan_ind), 2)).^2, 2);
-whiteness_p = my_whitetest(E2_test');
+[whiteness.p, whiteness.stat, whiteness.sig_thr] = my_whitetest_multivar(E2_test);
 
 Y_hat = [nan(p, test_ind(1)), Y_test_hat_full, nan(p, N-test_ind(end))];     % Appending Y_test_hat with NaNs before and after corresponding to training time points.
 if iscell(Y)

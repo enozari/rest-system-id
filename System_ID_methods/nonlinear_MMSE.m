@@ -1,6 +1,6 @@
-function [model, R2, whiteness_p, Y_hat] = nonlinear_MMSE(Y, n_AR_lags, N_pdf, rel_sigma, memory, ...
-    use_parallel, test_range)
-%NONLINEAR_PAIRWISE_MMSE Fitting and cross-validating the optimal minimum
+function [model, R2, whiteness, Y_hat] = nonlinear_MMSE(Y, n_AR_lags, N_pdf, rel_sigma, memory, ...
+    test_range)
+%NONLINEAR_MMSE Fitting and cross-validating the optimal minimum
 % mean squared error nonlinear estimator.
 %
 %   Input arguments
@@ -10,17 +10,18 @@ function [model, R2, whiteness_p, Y_hat] = nonlinear_MMSE(Y, n_AR_lags, N_pdf, r
 %   channels along the first dimension and time along the second dimension.
 %   This is the only mandatory input.
 % 
+%   n_AR_lags: number of autoregressive lags from each channel to be used
+%   in its one-step-ahead prediction.
+% 
 %   N_pdf: the number of discretization points for estimating the
 %   conditional distributions.
 % 
-%   pdf_weight: struct variable determining the pdf weighting method and
-%   parameter to be used. See MMSE_est.m for details.
+%   rel_sigma: the standard deviation (sigma) of the Gaussian window used for
+%   assessing closeness of test to train data points, relative to the range
+%   of data in Y_train (see MMSE_est_nd.m for more details).
 % 
 %   memory: code determining the amount of memory to be used for MMSE
-%   estimation. See MMSE_est.m for details.
-% 
-%   use_parallel: whether to use parallel loops (parfor) to speed up
-%   computations.
+%   estimation. See MMSE_est_nd.m for details.
 % 
 %   test_range: a sub-interval of [0, 1] indicating the portion of Y that
 %   is used for test (cross-validation). The rest of Y is used for
@@ -34,8 +35,9 @@ function [model, R2, whiteness_p, Y_hat] = nonlinear_MMSE(Y, n_AR_lags, N_pdf, r
 %   R2: an n x 1 vector containing the cross-validated prediction R^2 of
 %   the n channels.
 % 
-%   whiteness_p: an n x 1 vector containing the p-values of the chi-squared
-%   test of whiteness for the cross-validated residuals of each channel.
+%   whiteness: a struct containing the statistic (Q) and the
+%   randomization-basd significance threshold and p-value of the
+%   multivariate whiteness test.
 % 
 %   Y_hat: a cell array the same size as Y but for cross-validated one-step
 %   ahead predictions using the fitted model. This is only meaningful for
@@ -45,7 +47,7 @@ function [model, R2, whiteness_p, Y_hat] = nonlinear_MMSE(Y, n_AR_lags, N_pdf, r
 %   data is available. Therefore, the first column of all elements of Y_hat
 %   are also NaNs, regardless of being a training or a test time point.
 % 
-%   Copyright (C) 2020, Erfan Nozari
+%   Copyright (C) 2021, Erfan Nozari
 %   All rights reserved.
 
 if nargin < 2 || isempty(n_AR_lags)
@@ -60,10 +62,7 @@ end
 if nargin < 5
     memory = [];
 end
-if nargin < 6 || isempty(use_parallel)
-    use_parallel = 1;
-end
-if nargin < 7 || isempty(test_range)
+if nargin < 6 || isempty(test_range)
     test_range = [0.8 1];
 end
 
@@ -102,4 +101,4 @@ end
 Y_test_plus = cell2mat(cellfun(@(Y)Y(:, 1+max(1, n_AR_lags):end), Y_test_cell, 'UniformOutput', 0));
 E_test = Y_test_plus_hat - Y_test_plus;                                     % Prediction error
 R2 = 1 - sum(E_test.^2, 2) ./ sum((Y_test_plus - mean(Y_test_plus, 2)).^2, 2);
-whiteness_p = my_whitetest(E_test');
+[whiteness.p, whiteness.stat, whiteness.sig_thr] = my_whitetest_multivar(E_test);

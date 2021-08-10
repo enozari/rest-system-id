@@ -21,7 +21,7 @@ end
 
 % Adding the parent directory and its sub-directories to the path
 full_filename = mfilename('fullpath');
-addpath(genpath(full_filename(1:strfind(full_filename, 'Macroscopic Linearity Simulation')-2)))
+addpath(genpath(full_filename(1:strfind(full_filename, 'Macroscopic_Linearity_Simulation')-2)))
 
 if ~exist('macro_lin_data', 'dir')
     mkdir macro_lin_data
