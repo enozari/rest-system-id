@@ -38,7 +38,7 @@ function Y_test = MMSE_est_nd(X_train, Y_train, X_test, N_pdf, rel_sigma, memory
 %   implemented in this version as the minimum memory requirement should be
 %   sufficiently low for most devices.
 % 
-%   Copyright (C) 2020, Erfan Nozari
+%   Copyright (C) 2021, Erfan Nozari
 %   All rights reserved.
 
 if nargin < 4 || isempty(N_pdf)
@@ -71,7 +71,10 @@ elseif memory > 0
         Y_test_pdf_weight(:, :, i) = exp(-sqrt(sum((permute(X_train(:, :, i), [1 3 2]) ... -
             - permute(X_test(:, :, i), [3 1 2])).^2, 3)) / 2/sigma^2);
     end
-elseif -memory*1e9 >= 1.5*three_dim_size_needed
+else
+    if -memory*1e9 < 1.5*three_dim_size_needed
+        warning(['Not enough memory is available. At least ' num2str(1.5*three_dim_size_needed) 'bytes of memory is required.'])
+    end
     Y_test_pdf_weight = nan(N_train, N_test, n);
     n_slice = floor(-memory*1e9 / three_dim_size_needed);                     % Number of test points that can be handled in 1 slice without running out of memory.
     if n_slice > 1
@@ -83,8 +86,6 @@ elseif -memory*1e9 >= 1.5*three_dim_size_needed
         Y_test_pdf_weight(:, :, i) = permute(exp(-sqrt(sum((permute(X_train(:, :, i), [1 4 2 3]) - permute(X_test(:, :, i), [4 1 2 3])).^2, 3)) ... /
             / 2/sigma^2), [1 2 4 3]);
     end
-else
-    error(['Not enough memory is available. At least ' num2str(1.5*three_dim_size_needed) 'bytes of memory is required.'])
 end
 
 four_dim_size_needed = N_train * N_test * n * N_pdf * 8;                    % The maximum amount of memory needed if only matrix operations are used and no for loops. All sizes are in bytes
@@ -105,7 +106,10 @@ elseif memory == 2
             Y_test_pdf_weight(:, :, i), 'pdf', 1);
         Y_test(:, :, i) = sum(Y_test_pdf_cpts .* Y_test_pdf, 1)' * Y_test_pdf_binwidth;
     end
-elseif -memory*1e9 >= two_dim_size_needed
+else
+    if -memory*1e9 < two_dim_size_needed
+        warning(['Out of memory. At least ' num2str(two_dim_size_needed) ' bytes of memory is needed.'])
+    end
     Y_test = nan(N_test, 1, n);
     n_slice = floor(-memory*1e9 / two_dim_size_needed);                     % Number of test points that can be handled in 1 slice without running out of memory.
     if n_slice > 1
@@ -118,12 +122,8 @@ elseif -memory*1e9 >= two_dim_size_needed
             Y_train(:, :, i), Y_pdf_edges, Y_test_pdf_weight(:, :, i), 'pdf', 1);
         Y_test(:, :, i) = permute(sum(Y_test_pdf_cpts .* Y_test_pdf, 1) * Y_test_pdf_binwidth, [2 1 3]);
     end
-else
-    error(['Out of memory. At least ' num2str(two_dim_size_needed) ' bytes of memory is needed.'])
 end
 
 for i = 1:n
     Y_test(isnan(Y_test(:, 1, i)), 1, i) = mean(Y_test(:, 1, i));           % This replaces the points that were unpredictable due to being far from all training points with the average of their channel, which is the unconditional MMSE predictor.
 end
-
-    
