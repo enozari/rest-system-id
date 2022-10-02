@@ -1,5 +1,5 @@
-function [model, R2, whiteness, Y_hat] = nonlinear_MMSE(Y, n_AR_lags, N_pdf, rel_sigma, memory, ...
-    test_range)
+function [model, R2, whiteness, Y_hat, runtime] = nonlinear_MMSE(Y, n_AR_lags, N_pdf, rel_sigma, k, ...
+    memory, test_range)
 %NONLINEAR_MMSE Fitting and cross-validating the optimal minimum
 % mean squared error nonlinear estimator.
 %
@@ -10,18 +10,19 @@ function [model, R2, whiteness, Y_hat] = nonlinear_MMSE(Y, n_AR_lags, N_pdf, rel
 %   channels along the first dimension and time along the second dimension.
 %   This is the only mandatory input.
 % 
-%   n_AR_lags: number of autoregressive lags from each channel to be used
-%   in its one-step-ahead prediction.
-% 
 %   N_pdf: the number of discretization points for estimating the
 %   conditional distributions.
 % 
-%   rel_sigma: the standard deviation (sigma) of the Gaussian window used for
-%   assessing closeness of test to train data points, relative to the range
-%   of data in Y_train (see MMSE_est_nd.m for more details).
+%   pdf_weight: struct variable determining the pdf weighting method and
+%   parameter to be used. See MMSE_est.m for details.
+% 
+%   k: number of multi-step ahead predictions for cross-validation.
 % 
 %   memory: code determining the amount of memory to be used for MMSE
-%   estimation. See MMSE_est_nd.m for details.
+%   estimation. See MMSE_est.m for details.
+% 
+%   use_parallel: whether to use parallel loops (parfor) to speed up
+%   computations.
 % 
 %   test_range: a sub-interval of [0, 1] indicating the portion of Y that
 %   is used for test (cross-validation). The rest of Y is used for
@@ -59,15 +60,27 @@ end
 if nargin < 4 || isempty(rel_sigma)
     rel_sigma = 0.002;
 end
-if nargin < 5
+if nargin < 5 || isempty(k)
+    k = 1;
+end
+if nargin < 6
     memory = [];
 end
-if nargin < 6 || isempty(test_range)
+if nargin < 7 || isempty(test_range)
     test_range = [0.8 1];
 end
 
 %% Organizing data into separate train and test segments
 [Y_train_cell, Y_test_cell, break_ind, test_ind, N_test_vec, n, N] = tt_decomp(Y, test_range);
+
+model.eq = ['$y_i(t) - y_i(t-1) = E[y_i(t) - y_i(t-1) | y_i(t-1), y_i(t-2), ..., y_i(t-d)], i = 1,\dots,n$ \\ ' ...
+    '``model on demand": no explicit form, $y_i(t) - y_i(t-1)$ estimated separately for any given test (query) point $(y_i(t-1), y_i(t-2), ..., y_i(t-d))$.'];
+model.d = n_AR_lags;
+
+runtime.train = 0;
+
+%% Cross-validated k-step ahead prediction
+runtime_test_start = tic;
 
 AR_lags = 1:n_AR_lags;
 Y_train_lags = cell2mat(cellfun(@(Y)cell2mat(arrayfun(@(lag)Y(:, 1+n_AR_lags-lag:end-lag), ...
@@ -76,29 +89,29 @@ Y_train_plus = cell2mat(cellfun(@(Y)Y(:, 1+max(1, n_AR_lags):end), Y_train_cell,
 Y_train = cell2mat(cellfun(@(Y)Y(:, max(1, n_AR_lags):end-1), Y_train_cell, 'UniformOutput', 0));
 Y_train_diff = Y_train_plus - Y_train;
 
-n_additional_AR_lags = n_AR_lags - 1;                                       % This is the number of addtional zeros that need to be added to the beginning of Y_test to allow for one step ahead prediction of time points 2 and onwards.
-Y_test_cell = cellfun(@(Y)[zeros(n, n_additional_AR_lags), Y], Y_test_cell, 'UniformOutput', 0);
-Y_test_lags = cell2mat(cellfun(@(Y)cell2mat(arrayfun(@(lag)Y(:, 1+n_AR_lags-lag:end-lag), ...
+n_add_AR_lags = n_AR_lags - 1;                                       % This is the number of addtional zeros that need to be added to the beginning of Y_test to allow for one step ahead prediction of time points 2 and onwards.
+Y_test_cell = cellfun(@(Y)[zeros(n, n_add_AR_lags), Y], Y_test_cell, 'UniformOutput', 0);
+Y_test_lags = cell2mat(cellfun(@(Y)cell2mat(arrayfun(@(lag)Y(:, n_add_AR_lags+1+1-lag:end-lag), ...
     permute(AR_lags, [1 3 2]), 'UniformOutput', 0)), Y_test_cell, 'UniformOutput', 0));                % Similar to Y_train_lags but for test data. Same below.
-Y_test = cell2mat(cellfun(@(Y)Y(:, max(1, n_AR_lags):end-1), Y_test_cell, 'UniformOutput', 0));
 
-%% MMSE prediction
-Y_test_diff_hat = permute(MMSE_est_nd(permute(Y_train_lags, [2 3 1]), permute(Y_train_diff, [2 3 1]), ...
-    permute(Y_test_lags, [2 3 1]), N_pdf, rel_sigma, memory), [3 1 2]);     % Prediction of the derivative (approximated by first difference) of Y_test. The first dimension is predicted-channel, the second dimension is time, and the third dimension is predictor-channel.
-Y_test_plus_hat = Y_test + Y_test_diff_hat;                                 % _plus refers to the fact that each column of Y_test_plus_hat corresponds to one time step later than the corresponding column in Y_test. This is corrected by adding a column of NaNs at the beginning to obtain Y_test_hat.
+for i = 1:k
+    Y_test_diff_hat = permute(MMSE_est_nd(permute(Y_train_lags, [2 3 1]), permute(Y_train_diff, [2 3 1]), ...
+        permute(Y_test_lags, [2 3 1]), N_pdf, rel_sigma, memory), [3 1 2]);     % Prediction of the derivative (approximated by first difference) of Y_test. The first dimension is predicted-channel, the second dimension is time, and the third dimension is predictor-channel.
+    Y_test_plus_hat = Y_test_lags(:, :, 1) + Y_test_diff_hat;                                          % _plus refers to the fact that each column of Y_test_plus_hat corresponds to one time step later than the corresponding column in Y_test. This is corrected by adding a column of NaNs at the beginning to obtain Y_test_hat.
+    
+    Y_test_lags = cat(3, Y_test_plus_hat(:, 1:end-1), Y_test_lags(:, 1:end-1, 1:end-1));
+end
 
-model.eq = ['$y_i(t) - y_i(t-1) = E[y_i(t) - y_i(t-1) | y_i(t-1), y_i(t-2), ..., y_i(t-d)], i = 1,\dots,n$ \\ ' ...
-    '``model on demand": no explicit form, $y_i(t) - y_i(t-1)$ estimated separately for any given test (query) point $(y_i(t-1), y_i(t-2), ..., y_i(t-d))$.'];
-model.d = n_AR_lags;
-
-%% Output arguments
-Y_test_hat = cell2mat(cellfun(@(Y)[nan(n, 1), Y], mat2cell(Y_test_plus_hat, n, N_test_vec-1), 'UniformOutput', 0));
+Y_test_hat = cell2mat(cellfun(@(Y)[nan(n, k), Y], mat2cell(Y_test_plus_hat, n, N_test_vec-k), 'UniformOutput', 0));
 Y_hat = [nan(n, test_ind(1)), Y_test_hat, nan(n, N-test_ind(end))];         % Appending Y_test_hat with NaNs before and after corresponding to training time points.
 if iscell(Y)
     Y_hat = mat2cell(Y_hat, n, diff(break_ind));
 end
 
-Y_test_plus = cell2mat(cellfun(@(Y)Y(:, 1+max(1, n_AR_lags):end), Y_test_cell, 'UniformOutput', 0));
+runtime.test = toc(runtime_test_start);
+runtime.total = runtime.train + runtime.test;
+
+Y_test_plus = cell2mat(cellfun(@(Y)Y(:, n_add_AR_lags+k+1:end), Y_test_cell, 'UniformOutput', 0));
 E_test = Y_test_plus_hat - Y_test_plus;                                     % Prediction error
 R2 = 1 - sum(E_test.^2, 2) ./ sum((Y_test_plus - mean(Y_test_plus, 2)).^2, 2);
 [whiteness.p, whiteness.stat, whiteness.sig_thr] = my_whitetest_multivar(E_test);

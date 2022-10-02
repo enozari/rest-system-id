@@ -1,5 +1,5 @@
-function [model, R2, whiteness, Y_hat] = linear_neural(Y, TR, n_h, n_phi, n_psi, W_mask, use_parallel, ...
-    test_range)
+function [model, R2, whiteness, Y_hat, runtime] = linear_neural(Y, TR, n_h, n_phi, n_psi, W_mask, k, ...
+    use_parallel, test_range)
 %LINEAR_NEURAL Fitting and cross-validating a general family of linear
 % models that include a model for the hemodynamic response function (HRF)
 % (and therefore have states at the "neural" level).
@@ -27,6 +27,8 @@ function [model, R2, whiteness, Y_hat] = linear_neural(Y, TR, n_h, n_phi, n_psi,
 %   W_mask: a character vector indicating what sparsity pattern should be
 %   used for W. options are 'full' and 'lasso', corresponding respectively
 %   to a dense W and a sparse W using LASSO (1-norm) regularization.
+% 
+%   k: number of multi-step ahead predictions for cross-validation.
 % 
 %   use_parallel: whether to use parallel loops (parfor) to speed up
 %   computations.
@@ -73,10 +75,13 @@ end
 if nargin < 6 || isempty(W_mask)
     W_mask = 1e-2;                                                     % The lambda parameter of the LASSO regularization
 end
-if nargin < 7 || isempty(use_parallel)
+if nargin < 7 || isempty(k)
+    k = 1;
+end
+if nargin < 8 || isempty(use_parallel)
     use_parallel = 1;
 end
-if nargin < 8 || isempty(test_range)
+if nargin < 9 || isempty(test_range)
     test_range = [0.8 1];
 end
 
@@ -90,6 +95,9 @@ num_output_lags = max_lag * 3;                                              % In
 
 %% Organizing data into separate train and test segments
 [Y_train_cell, Y_test_cell, break_ind, test_ind, N_test_vec, n, N] = tt_decomp(Y, test_range);
+
+runtime_train_start = tic;
+
 Y_train_lags = cell2mat(cellfun(@(Y)extract_lags(Y, 0:n_psi, max_lag), Y_train_cell, 'UniformOutput', 0)); % A large matrix of training Y and all its time lags used for regression
 
 %% Obtaining initial X_train_lags
@@ -121,7 +129,20 @@ for i_EM_iter = 1:n_EM_iter                                                 % It
     X_train_lags = cell2mat(cellfun(@(Y)state_est(Y, W, H, Phi, Psi), Y_train_cell, 'UniformOutput', 0)); % The state estimation step
 end
 
-%% Cross-validated one step ahead prediction
+model.eq = ['$$x(t) - x(t-1) = W x(t-1) + G_1(q) e_1(t) \\ ' ...
+    'y(t) = H(q) x(t) + G_2(q) e_2(t) \\ ' ...
+    'H(q) = \sum_{p=1}^{n_h} \diag(H_{:,p}) q^{-p} \\ ' ...
+    'F_1(q) = I - G_1^{-1}(q) = \sum_{p=1}^{n_\phi} \diag(\Phi_{:,p}) q^{-p} \\ ' ...
+    'F_2(q) = I - G_2^{-1}(q) = \sum_{p=1}^{n_\psi} \diag(\Psi_{:,p}) q^{-p}$$'];
+model.n_h = n_h;
+model.n_phi = n_phi;
+model.n_psi = n_psi;
+
+runtime.train = toc(runtime_train_start);
+
+%% Cross-validated k-step ahead prediction
+runtime_test_start = tic;
+
 n_test = numel(Y_test_cell);                                                % Number of distinct test data segments
 Y_test_full = cell2mat(Y_test_cell);
 
@@ -140,37 +161,56 @@ for i_EM_iter = 1:n_EM_iter
     
     for i_test = 1:n_test
         Y_test = [zeros(n, 2*max_lag), Y_test_cell{i_test}];                % Padding Y_test_cell{i_test} with enough zero columns such that its prediction can be done from its second time point (the first time point is never predictable by definition).
-        Y_test_lags = extract_lags(Y_test, 0:n_psi, max_lag);
+        Y_test_lags = extract_lags(Y_test, 1:n_psi, max_lag);
+        Y_test_lags(:, 1:max_lag+1, :) = [];
         N_test = N_test_vec(i_test) + 2*max_lag;                            % Taking into account the 2*max_lag zero columns that we added to the beginning of Y_test_cell entires
         X_test_lags = nan(n, N_test, max_lag+1);                            % Estimate of the state corresponding to Y_test_lags
-        if use_parallel
-            parfor t = max_lag+1:N_test                                     % For each test point t, we estimate the state using outputs from beginning all the way to time t-1. If t is large, outputs very far in the past are not informative, and we only go num_output_lags steps into the past.
-                warning('off')
-                X_test_lags_t = state_est(Y_test(:, max(1, t-num_output_lags+1):t), W, H, Phi, Psi);
-                warning('on')
-                X_test_lags(:, t, :) = X_test_lags_t(:, end, :);
+        
+        Y_test_hat_k = cell(k-1, 1);
+        for i = 1:k
+            if use_parallel
+                parfor t = max_lag+1:N_test                                     % For each test point t, we estimate the state using outputs from beginning all the way to time t-1. If t is large, outputs very far in the past are not informative, and we only go num_output_lags steps into the past.
+                    warning('off')
+                    Y_test4state_est = Y_test(:, max(1, t-num_output_lags+1):t-(i-1));
+                    for j = 1:i-1
+                        Y_test4state_est = [Y_test4state_est, Y_test_hat_k{j}(:, t-(i-1)+j)];
+                    end
+                    X_test_lags_t = state_est(Y_test4state_est, W, H, Phi, Psi);
+                    warning('on')
+                    X_test_lags(:, t, :) = X_test_lags_t(:, end, :);
+                end
+            else
+                for t = max_lag+1:N_test
+                    warning('off')
+                    Y_test4state_est = Y_test(:, max(1, t-num_output_lags+1):t-(i-1));
+                    for j = 1:i-1
+                        Y_test4state_est = [Y_test4state_est, Y_test_hat_k{j}(:, t-(i-1)+j)];
+                    end
+                    X_test_lags_t = state_est(Y_test4state_est, W, H, Phi, Psi);
+                    warning('on')
+                    X_test_lags(:, t, :) = X_test_lags_t(:, end, :);
+                end
             end
-        else
-            for t = max_lag+1:N_test
-                warning('off')
-                X_test_lags_t = state_est(Y_test(:, max(1, t-num_output_lags+1):t), W, H, Phi, Psi);
-                warning('on')
-                X_test_lags(:, t, :) = X_test_lags_t(:, end, :);
-            end
-        end
-        X_test_lags(:, 1:max_lag, :) = [];                                  % Removing max_lag time points at the beginning since they are not all in theory predictable from Y_test. Recall that 2*max_lag zeros were added above, so still we have max_lag entries extra.
+            X_test_lags(:, 1:max_lag, :) = [];                                  % Removing max_lag time points at the beginning since they are not all in theory predictable from Y_test. Recall that 2*max_lag zeros were added above, so still we have max_lag entries extra.
 
-        X_test_lags_2D = cell2mat(reshape(mat2cell(X_test_lags, n, size(X_test_lags, 2), ones(1, size(X_test_lags, 3))), [], 1)); % Concatenating the 3D layers of X_test_lags along the first dimension to prepare it for matrix multiplication.
-        X_test_hat = A_T * X_test_lags_2D(n+1:end, 1:end-1);                % Running the state equation one step ahead (state one step ahead prediction)
-        X_test_hat_lags = extract_lags(X_test_hat, 0:max_lag, max_lag);     % Extrating lags since lags were lost in the forward simulation above. This step strips max_lag more time points from the beginning, so X_test_hat_lags has the same number of time points as Y_test_cell entries had originally.
-        Y_test_hat = sum(permute(Psi, [1 3 2]) .* Y_test_lags(:, 1+max_lag+1:end, 2:end), 3) ... +
-            + sum(permute(Delta, [1 3 2]) .* X_test_hat_lags(:, :, 2:1+n_h+n_psi), 3); % Running the output equation (computing predicted output from predicted state)
-        Y_test_hat = [nan(n, 1), Y_test_hat];                               % The first time point of each test segment cannot be predicted by definition in one step ahead prediction
+            X_test_lags_2D = cell2mat(reshape(mat2cell(X_test_lags, n, size(X_test_lags, 2), ones(1, size(X_test_lags, 3))), [], 1)); % Concatenating the 3D layers of X_test_lags along the first dimension to prepare it for matrix multiplication.
+            X_test_hat = A_T * X_test_lags_2D(n+1:end, 1:end-1);                % Running the state equation one step ahead (state one step ahead prediction)
+            X_test_hat_lags = extract_lags(X_test_hat, 1:n_h+n_psi, max_lag);     % Extrating lags since lags were lost in the forward simulation above. This step strips max_lag more time points from the beginning, so X_test_hat_lags has the same number of time points as Y_test_cell entries had originally.
+            Y_test_hat = sum(permute(Psi, [1 3 2]) .* Y_test_lags, 3) ... +
+                + sum(permute(Delta, [1 3 2]) .* X_test_hat_lags, 3); % Running the output equation (computing predicted output from predicted state)
+            Y_test_hat = [nan(n, 1), Y_test_hat];                               % The first time point of each test segment cannot be predicted by definition in one step ahead prediction
+            
+            Y_test_hat_k{i} = [zeros(n, 2*max_lag+i), Y_test_hat(:, i+1:end)];
+            Y_test_lags = cat(3, Y_test_hat(:, 1:end-1), ...
+                [nan(n, 1, n_psi-1), Y_test_lags(:, 1:end-1, 1:end-1)]);
+        end
+        
         Y_test_hat_rec{i_test}(:, :, i_EM_iter) = Y_test_hat;               % Book keeping
 
         nan_ind{i_test}(:, :, i_EM_iter) = any(isnan(Y_test_hat));          % In addition to the first time point, some first few columns of Y_test_hat may contain NANs inheried from the first few slice-columns of X_test_lags because of numerical instabilities in state estimation with very few time points.
-        assert(nnz(nan_ind{i_test}(:, :, i_EM_iter)) < 0.05 * N_test, ...
-            'Too many NAN columns in Y_test_hat, check the state estimation and X_test_lags, or, increase the number of test points.')
+        if nnz(nan_ind{i_test}(:, :, i_EM_iter)) > 0.05 * N_test
+            warning('Too many NAN columns in Y_test_hat. Check the state estimation and X_test_lags or increase the number of test points.')
+        end
     end
         
     nan_ind_full = cell2mat(cellfun(@(ind)ind(:, :, i_EM_iter), nan_ind, 'UniformOutput', 0)); % Concatenating the i_EM_iter'th slice of nan_ind. Same below.
@@ -182,27 +222,23 @@ end
 
 R2_cmp = median(R2_rec)' - median(R2_rec);
 best_EM_iter = find(all(R2_cmp >= 0, 2));                                   % Finding the iteration with the best median R^2
-R2 = R2_rec(:, best_EM_iter);
 
-model.eq = ['$$x(t) - x(t-1) = W x(t-1) + G_1(q) e_1(t) \\ ' ...
-    'y(t) = H(q) x(t) + G_2(q) e_2(t) \\ ' ...
-    'H(q) = \sum_{p=1}^{n_h} \diag(H_{:,p}) q^{-p} \\ ' ...
-    'F_1(q) = I - G_1^{-1}(q) = \sum_{p=1}^{n_\phi} \diag(\Phi_{:,p}) q^{-p} \\ ' ...
-    'F_2(q) = I - G_2^{-1}(q) = \sum_{p=1}^{n_\psi} \diag(\Psi_{:,p}) q^{-p}$$'];
 model.W = W_rec(:, :, best_EM_iter);
-model.n_h = n_h;
 model.H = H_rec(:, :, best_EM_iter);
-model.n_phi = n_phi;
 model.Phi = Phi_rec(:, :, best_EM_iter);
-model.n_psi = n_psi;
 model.Psi = Psi_rec(:, :, best_EM_iter);
 
-[whiteness.p, whiteness.stat, whiteness.sig_thr] = my_whitetest_multivar(E_test_rec{best_EM_iter});
 Y_test_hat_full = cell2mat(cellfun(@(Y)Y(:, :, best_EM_iter), Y_test_hat_rec, 'UniformOutput', 0));
 Y_hat = [nan(n, test_ind(1)), Y_test_hat_full, nan(n, N-test_ind(end))];
 if iscell(Y)
     Y_hat = mat2cell(Y_hat, n, diff(break_ind));
 end
+
+runtime.test = toc(runtime_test_start);
+runtime.total = runtime.train + runtime.test;
+
+R2 = R2_rec(:, best_EM_iter);
+[whiteness.p, whiteness.stat, whiteness.sig_thr] = my_whitetest_multivar(E_test_rec{best_EM_iter});
 end
 
 %% Auxiliary functions

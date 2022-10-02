@@ -1,5 +1,5 @@
 function [model_summary_rec, R2_rec, runtime_rec, whiteness_rec, model_rec, Y_hat_rec, best_model] = ...
-    all_methods_ieeg(Y, TR, test_range, run_subspace, i_segment, MMSE_memory)
+    all_methods_ieeg(Y, TR, k, test_range, run_subspace, i_segment, MMSE_memory)
 %ALL_METHODS_IEEG The function that calls all the methods of system
 % identification for iEEG data discussed in the paper
 % E. Nozari et. al., "Is the brain macroscopically linear? A system
@@ -13,6 +13,8 @@ function [model_summary_rec, R2_rec, runtime_rec, whiteness_rec, model_rec, Y_ha
 %   mandatory input.
 % 
 %   TR: Sampling time. 
+% 
+%   k: number of multi-step ahead predictions for cross-validation.
 % 
 %   test_range: a sub-interval of [0, 1] indicating the portion of Y that
 %   is used for test (cross-validation). The rest of Y is used for
@@ -109,7 +111,7 @@ for i_exec = exec_order                                                     % Ru
             W_mask = [];                                                    % The default sparsity structure of linear_AR (which is irrelevant here since include_W = 0)
             tic
             [model_rec{i_exec}, R2_rec(:, i_exec), whiteness_rec(i_exec), Y_hat_rec{i_exec}] = ...
-                linear_AR(Y, include_W, n_AR_lags, W_mask, use_parallel, test_range);
+                linear_AR(Y, include_W, n_AR_lags, W_mask, k, use_parallel, test_range);
             runtime_rec(i_exec) = toc;
             disp([model_summary_rec{i_exec} ' completed in ' num2str(runtime_rec(i_exec)) ' seconds.'])
         case 2
@@ -120,7 +122,7 @@ for i_exec = exec_order                                                     % Ru
             W_mask = 'full';                                                % Dense, potentially all-to-all effective connectivity
             tic
             [model_rec{i_exec}, R2_rec(:, i_exec), whiteness_rec(i_exec), Y_hat_rec{i_exec}] = ...
-                linear_AR(Y, include_W, n_AR_lags, W_mask, use_parallel, test_range);
+                linear_AR(Y, include_W, n_AR_lags, W_mask, k, use_parallel, test_range);
             runtime_rec(i_exec) = toc;
             disp([model_summary_rec{i_exec} ' completed in ' num2str(runtime_rec(i_exec)) ' seconds.'])
         case 3
@@ -129,10 +131,9 @@ for i_exec = exec_order                                                     % Ru
             include_W = 1;
             n_AR_lags = 1;
             W_mask = 1.2;                                                    % LASSO regularization to promote sparsity in effective connectivity
-            toolbox_license_checkout('Statistics_Toolbox');
             tic
             [model_rec{i_exec}, R2_rec(:, i_exec), whiteness_rec(i_exec), Y_hat_rec{i_exec}] = ...
-                linear_AR(Y, include_W, n_AR_lags, W_mask, use_parallel, test_range);
+                linear_AR(Y, include_W, n_AR_lags, W_mask, k, use_parallel, test_range);
             runtime_rec(i_exec) = toc;
             disp([model_summary_rec{i_exec} ' completed in ' num2str(runtime_rec(i_exec)) ' seconds.'])
         case 4
@@ -141,10 +142,9 @@ for i_exec = exec_order                                                     % Ru
             include_W = 1;
             n_AR_lags = 100;
             W_mask = 1.5;
-            toolbox_license_checkout('Statistics_Toolbox');
             tic
             [model_rec{i_exec}, R2_rec(:, i_exec), whiteness_rec(i_exec), Y_hat_rec{i_exec}] = ...
-                linear_AR(Y, include_W, n_AR_lags, W_mask, use_parallel, test_range);
+                linear_AR(Y, include_W, n_AR_lags, W_mask, k, use_parallel, test_range);
             runtime_rec(i_exec) = toc;
             disp([model_summary_rec{i_exec} ' completed in ' num2str(runtime_rec(i_exec)) ' seconds.'])
         case 5
@@ -155,7 +155,7 @@ for i_exec = exec_order                                                     % Ru
             W_mask = [];
             tic
             [model_rec{i_exec}, R2_rec(:, i_exec), whiteness_rec(i_exec), Y_hat_rec{i_exec}] = ...
-                linear_AR(Y, include_W, n_AR_lags, W_mask, use_parallel, test_range);
+                linear_AR(Y, include_W, n_AR_lags, W_mask, k, use_parallel, test_range);
             runtime_rec(i_exec) = toc;
             disp([model_summary_rec{i_exec} ' completed in ' num2str(runtime_rec(i_exec)) ' seconds.'])
         case 6
@@ -170,7 +170,7 @@ for i_exec = exec_order                                                     % Ru
                 n = 436;
                 tic
                 [model_rec{i_exec}, R2_rec(:, i_exec), whiteness_rec(i_exec), Y_hat_rec{i_exec}] = ...
-                    linear_subspace(Y, s, r, n, test_range);
+                    linear_subspace(Y, s, r, n, k, test_range);
                 runtime_rec(i_exec) = toc;
                 delete(filename)
                 disp([model_summary_rec{i_exec} ' completed in ' num2str(runtime_rec(i_exec)) ' seconds.'])
@@ -187,11 +187,11 @@ for i_exec = exec_order                                                     % Ru
         case 7
             %% Nonlinear model via MINDy [Singh et al., 2019] applied directly to time series (no HRF/deconvolution)
             model_summary_rec{i_exec} = 'NMM';
-            toolbox_license_checkout('Statistics_Toolbox');
+            doPreProc = 'n';
             lambda = {0.2 0.2 2 0.5};
             tic
             [model_rec{i_exec}, R2_rec(:, i_exec), whiteness_rec(i_exec), Y_hat_rec{i_exec}] = ...
-                nonlinear_MINDy(Y, TR, 'n', lambda, use_parallel, test_range);
+                nonlinear_MINDy(Y, TR, doPreProc, lambda, k, use_parallel, test_range);
             runtime_rec(i_exec) = toc;
             disp([model_summary_rec{i_exec} ' completed in ' num2str(runtime_rec(i_exec)) ' seconds.'])
         case 8
@@ -203,13 +203,12 @@ for i_exec = exec_order                                                     % Ru
             scale_h.do_scale = false;
             tic
             [model_rec{i_exec}, R2_rec(:, i_exec), whiteness_rec(i_exec), Y_hat_rec{i_exec}] = ...
-                nonlinear_manifold(Y, n_AR_lags, kernel, h, scale_h, test_range);
+                nonlinear_manifold(Y, n_AR_lags, kernel, h, scale_h, k, test_range);
             runtime_rec(i_exec) = toc;
             disp([model_summary_rec{i_exec} ' completed in ' num2str(runtime_rec(i_exec)) ' seconds.'])
         case 9
             %% Nonlinear model based on deep neural networks
             model_summary_rec{i_exec} = 'MLP';
-            toolbox_license_checkout('Neural_Network_Toolbox');
             n_AR_lags = 6;
             hidden_width = 26;
             hidden_depth = 4;
@@ -224,7 +223,7 @@ for i_exec = exec_order                                                     % Ru
                 tic
                 [model_rec{i_exec}, R2_rec(:, i_exec), whiteness_rec(i_exec), Y_hat_rec{i_exec}] = ...
                     nonlinear_MLP(Y, n_AR_lags, hidden_width, hidden_depth, dropout_prob, ...
-                    exe_env, learn_rate, test_range);
+                    exe_env, learn_rate, k, test_range);
                 runtime_rec(i_exec) = toc;
                 if ~any(isnan(R2_rec(:, i_exec)))
                     break
@@ -234,7 +233,6 @@ for i_exec = exec_order                                                     % Ru
         case 10
             %% Nonlinear model based on convolutional neural networks
             model_summary_rec{i_exec} = 'CNN';
-            toolbox_license_checkout('Neural_Network_Toolbox');
             n_AR_lags = 11;
             hidden_depth = 7;
             filter_size = 2;
@@ -250,7 +248,7 @@ for i_exec = exec_order                                                     % Ru
                 [model_rec{i_exec}, R2_rec(:, i_exec), whiteness_rec(i_exec), Y_hat_rec{i_exec}] = ...
                     nonlinear_CNN(Y, n_AR_lags, hidden_depth, filter_size, n_filter, ...
                     pool_size, dilation_factor, exp_dilation, dropout_prob, ...
-                    exe_env, learn_rate, test_range);
+                    exe_env, learn_rate, k, test_range);
                 runtime_rec(i_exec) = toc;
                 if ~any(isnan(R2_rec(:, i_exec)))
                     break
@@ -260,7 +258,6 @@ for i_exec = exec_order                                                     % Ru
         case 11
             %% Nonlinear model based on LSTM neural networks with infinite impulse response
             model_summary_rec{i_exec} = 'LSTM1';
-            toolbox_license_checkout('Neural_Network_Toolbox');
             rec_layer = 'lstm';
             n_AR_lags = nan;
             hidden_width = 1;
@@ -270,7 +267,7 @@ for i_exec = exec_order                                                     % Ru
                 tic
                 [model_rec{i_exec}, R2_rec(:, i_exec), whiteness_rec(i_exec), Y_hat_rec{i_exec}] = ...
                     nonlinear_LSTM(Y, rec_layer, n_AR_lags, hidden_width, exe_env, ...
-                    learn_rate, test_range);
+                    learn_rate, k, test_range);
                 runtime_rec(i_exec) = toc;
                 if ~any(isnan(R2_rec(:, i_exec)))
                     break
@@ -280,7 +277,6 @@ for i_exec = exec_order                                                     % Ru
         case 12
             %% Nonlinear model based on LSTM neural networks with finite impulse response
             model_summary_rec{i_exec} = 'LSTM2';
-            toolbox_license_checkout('Neural_Network_Toolbox');
             rec_layer = 'lstm';
             n_AR_lags = 7;
             hidden_width = 1;
@@ -290,7 +286,7 @@ for i_exec = exec_order                                                     % Ru
                 tic
                 [model_rec{i_exec}, R2_rec(:, i_exec), whiteness_rec(i_exec), Y_hat_rec{i_exec}] = ...
                     nonlinear_LSTM(Y, rec_layer, n_AR_lags, hidden_width, exe_env, ...
-                    learn_rate, test_range);
+                    learn_rate, k, test_range);
                 runtime_rec(i_exec) = toc;
                 if ~any(isnan(R2_rec(:, i_exec)))
                     break
@@ -305,7 +301,7 @@ for i_exec = exec_order                                                     % Ru
             rel_sigma = 7e-3;
             tic
             [model_rec{i_exec}, R2_rec(:, i_exec), whiteness_rec(i_exec), Y_hat_rec{i_exec}] = ...
-                nonlinear_MMSE(Y, n_AR_lags, N_pdf, rel_sigma, MMSE_memory, test_range);
+                nonlinear_MMSE(Y, n_AR_lags, N_pdf, rel_sigma, k, MMSE_memory, test_range);
             runtime_rec(i_exec) = toc;
             disp([model_summary_rec{i_exec} ' completed in ' num2str(runtime_rec(i_exec)) ' seconds.'])
         

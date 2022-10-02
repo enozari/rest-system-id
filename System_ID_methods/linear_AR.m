@@ -1,4 +1,4 @@
-function [model, R2, whiteness, Y_hat] = linear_AR(Y, include_W, n_AR_lags, W_mask, use_parallel, test_range)
+function [model, R2, whiteness, Y_hat, runtime] = linear_AR(Y, include_W, n_AR_lags, W_mask, k, use_parallel, test_range)
 %LINEAR_AR Fitting and cross-validating various autoregrssive linear models
 % directly at the signal level.
 %
@@ -25,7 +25,11 @@ function [model, R2, whiteness, Y_hat] = linear_AR(Y, include_W, n_AR_lags, W_ma
 %   used for W. options are 'full', 'forward', 'backward', 'stepwise', and
 %   'lasso', corresponding respectively to a dense W, a sparse W using
 %   forward, backward, or stepwise regrssion, or a sparse W using LASSO
-%   (1-norm) regularization.
+%   (1-norm) regularization. If a numeric value is provided, LASSO will be
+%   selected and the numeric value will be used for the regularization
+%   weight (lambda) of LASSO.
+% 
+%   k: number of multi-step ahead predictions for cross-validation.
 % 
 %   use_parallel: whether to use parallel loops (parfor) to speed up
 %   computations.
@@ -71,10 +75,13 @@ if isnumeric(W_mask)
     lambda_lasso = W_mask;
     W_mask = 'lasso';
 end
-if nargin < 5 || isempty(use_parallel)
+if nargin < 5 || isempty(k)
+    k = 1;
+end
+if nargin < 6 || isempty(use_parallel)
     use_parallel = 1;
 end
-if nargin < 6 || isempty(test_range)
+if nargin < 7 || isempty(test_range)
     test_range = [0.8 1];
 end
 
@@ -82,27 +89,31 @@ end
 [Y_train_cell, Y_test_cell, break_ind, test_ind, N_test_vec, n, N] = tt_decomp(Y, test_range);
 
 %% Preparing regressors
-Y_train_lags = cell2mat(cellfun(@(Y)cell2mat(arrayfun(@(lag)Y(:, 1+n_AR_lags-lag:end-lag), AR_lags', ...
-    'UniformOutput', 0)), Y_train_cell, 'UniformOutput', 0));               % A large matrix of training Y and all its time lags used for regression
-Y_train_plus = cell2mat(cellfun(@(Y)Y(:, 1+max(1, n_AR_lags):end), Y_train_cell, 'UniformOutput', 0)); % _plus regers to the time point +1. For instance, each column of Y_train_plus corresponds to one time step after the corresponding column of Y_train.
-Y_train = cell2mat(cellfun(@(Y)Y(:, max(1, n_AR_lags):end-1), Y_train_cell, 'UniformOutput', 0));
-if include_W
-    Phi = [Y_train; Y_train_lags];                                          % The matrix of regressors.
-    if any(strcmp(W_mask, {'forward', 'backward', 'stepwise'}))             % These methods need a 3-way breaking of the data, such that the training data is itself broken into a train-train part and a train-test one. This is due to the fact that these methods have an internal comparison between different models and that would require its own internal cross-validation.
-        ind = 1:round(0.75*size(Y_train, 2));                               % This is the index of time points used for train
-        ind_tst = round(0.75*size(Y_train, 2))+1:size(Y_train, 2);          % This is the index of time points used for test (other than the actual validation points put aside above)
-        Y_train_tst = Y_train(:, ind_tst);                                  % The part of Y_train used for internal cross-validation, same below
-        Y_train = Y_train(:, ind);
-        Y_train_plus_tst = Y_train_plus(:, ind_tst);
-        Y_train_plus = Y_train_plus(:, ind);
-        Phi_tst = Phi(:, ind_tst);
-        Phi = Phi(:, ind);
-        Y_train_diff_tst = Y_train_plus_tst - Y_train_tst;
+runtime_train_start = tic;
+
+if include_W || n_AR_lags > 0
+    Y_train_lags = cell2mat(cellfun(@(Y)cell2mat(arrayfun(@(lag)Y(:, 1+n_AR_lags-lag:end-lag), AR_lags', ...
+        'UniformOutput', 0)), Y_train_cell, 'UniformOutput', 0));               % A large matrix of training Y and all its time lags used for regression
+    Y_train_plus = cell2mat(cellfun(@(Y)Y(:, 1+max(1, n_AR_lags):end), Y_train_cell, 'UniformOutput', 0)); % _plus regers to the time point +1. For instance, each column of Y_train_plus corresponds to one time step after the corresponding column of Y_train.
+    Y_train = cell2mat(cellfun(@(Y)Y(:, max(1, n_AR_lags):end-1), Y_train_cell, 'UniformOutput', 0));
+    if include_W
+        Phi = [Y_train; Y_train_lags];                                          % The matrix of regressors.
+        if any(strcmp(W_mask, {'forward', 'backward', 'stepwise'}))             % These methods need a 3-way breaking of the data, such that the training data is itself broken into a train-train part and a train-test one. This is due to the fact that these methods have an internal comparison between different models and that would require its own internal cross-validation.
+            ind = 1:round(0.75*size(Y_train, 2));                               % This is the index of time points used for train
+            ind_tst = round(0.75*size(Y_train, 2))+1:size(Y_train, 2);          % This is the index of time points used for test (other than the actual validation points put aside above)
+            Y_train_tst = Y_train(:, ind_tst);                                  % The part of Y_train used for internal cross-validation, same below
+            Y_train = Y_train(:, ind);
+            Y_train_plus_tst = Y_train_plus(:, ind_tst);
+            Y_train_plus = Y_train_plus(:, ind);
+            Phi_tst = Phi(:, ind_tst);
+            Phi = Phi(:, ind);
+            Y_train_diff_tst = Y_train_plus_tst - Y_train_tst;
+        end
+    else
+        Phi = Y_train_lags;
     end
-else
-    Phi = Y_train_lags;
+    Y_train_diff = Y_train_plus - Y_train;
 end
-Y_train_diff = Y_train_plus - Y_train;
 
 %% Least squares
 Eye = logical(eye(n));
@@ -265,29 +276,47 @@ else
     end
 end
 
-%% Cross-validated one step ahead prediction
-n_additional_AR_lags = max(1, n_AR_lags) - 1;                               % This is the number of addtional zeros that need to be added to the beginning of Y_test to allow for one step ahead prediction of time points 2 and onwards.
-Y_test_cell = cellfun(@(Y)[zeros(n, n_additional_AR_lags), Y], Y_test_cell, 'UniformOutput', 0);
-Y_test_lags = cell2mat(cellfun(@(Y)cell2mat(arrayfun(@(lag)Y(:, 1+n_AR_lags-lag:end-lag), AR_lags', ...
+runtime.train = toc(runtime_train_start);
+
+%% Cross-validated k-step ahead prediction
+runtime_test_start = tic;
+
+n_add_AR_lags = max(1, n_AR_lags) - 1;                               % This is the number of addtional zeros that need to be added to the beginning of Y_test to allow for one step ahead prediction of time points 2 and onwards.
+Y_test_cell = cellfun(@(Y)[zeros(n, n_add_AR_lags), Y], Y_test_cell, 'UniformOutput', 0);
+Y_test_lags = cell2mat(cellfun(@(Y)cell2mat(arrayfun(@(lag)Y(:, n_add_AR_lags+1+1-lag:end-lag), AR_lags', ...
     'UniformOutput', 0)), Y_test_cell, 'UniformOutput', 0));                % Similar to Y_train_lags but for test data. Same below.
-Y_test_plus = cell2mat(cellfun(@(Y)Y(:, 1+max(1, n_AR_lags):end), Y_test_cell, 'UniformOutput', 0));
-Y_test = cell2mat(cellfun(@(Y)Y(:, max(1, n_AR_lags):end-1), Y_test_cell, 'UniformOutput', 0));
-if include_W
-    Phi = [Y_test; Y_test_lags];
-    Y_test_plus_hat = Y_test + Theta * Phi;
-else
-    if n_AR_lags == 0
-        Y_test_plus_hat = Y_test;
+Y_test_plus = cell2mat(cellfun(@(Y)Y(:, n_add_AR_lags+k+1:end), Y_test_cell, 'UniformOutput', 0));
+Y_test = cell2mat(cellfun(@(Y)Y(:, n_add_AR_lags+1:end-1), Y_test_cell, 'UniformOutput', 0));
+
+for i = 1:k
+    if include_W
+        if i == 1
+            Phi = [Y_test; Y_test_lags];
+        else
+            Phi = [repmat(Y_test_plus_hat(:, 1:end-1), 2, 1); Phi(n+1:end-n, 1:end-1)];
+        end
+        Y_test_plus_hat = (eye(size(Theta)) + Theta) * Phi;
     else
-        Phi = Y_test_lags;
-        Y_test_plus_hat = Y_test + Theta * Phi;        
+        if n_AR_lags == 0
+            Y_test_plus_hat = Y_test(:, 1:end-(i-1));
+        else
+            if i == 1
+                Phi = Y_test_lags;
+            else
+                Phi = [Y_test_plus_hat(:, 1:end-1); Phi(1:end-n, 1:end-1)];
+            end
+            Y_test_plus_hat = (eye(size(Theta)) + Theta) * Phi;
+        end
     end
 end
-Y_test_hat = cell2mat(cellfun(@(Y)[nan(n, 1), Y], mat2cell(Y_test_plus_hat, n, N_test_vec-1), 'UniformOutput', 0));
+Y_test_hat = cell2mat(cellfun(@(Y)[nan(n, k), Y], mat2cell(Y_test_plus_hat, n, N_test_vec-k), 'UniformOutput', 0));
 Y_hat = [nan(n, test_ind(1)), Y_test_hat, nan(n, N-test_ind(end))];         % Appending Y_test_hat with NaNs before and after corresponding to training time points.
 if iscell(Y)
     Y_hat = mat2cell(Y_hat, n, diff(break_ind));
 end
+
+runtime.test = toc(runtime_test_start);
+runtime.total = runtime.train + runtime.test;
 
 E_test = Y_test_plus_hat - Y_test_plus;                                     % Prediction error
 R2 = 1 - sum(E_test.^2, 2) ./ sum((Y_test_plus - mean(Y_test_plus, 2)).^2, 2);

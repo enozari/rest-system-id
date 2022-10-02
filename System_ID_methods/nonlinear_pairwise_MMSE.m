@@ -1,5 +1,5 @@
-function [model, R2, whiteness, Y_hat] = nonlinear_pairwise_MMSE(Y, N_pdf, pdf_weight, memory, ...
-    use_parallel, test_range)
+function [model, R2, whiteness, Y_hat, runtime] = nonlinear_pairwise_MMSE(Y, N_pdf, pdf_weight, memory, ...
+    k, use_parallel, test_range)
 %NONLINEAR_PAIRWISE_MMSE Fitting and cross-validating the optimal minimum
 % mean squared error nonlinear estimator.
 %
@@ -18,6 +18,8 @@ function [model, R2, whiteness, Y_hat] = nonlinear_pairwise_MMSE(Y, N_pdf, pdf_w
 % 
 %   memory: code determining the amount of memory to be used for MMSE
 %   estimation. See MMSE_est.m for details.
+% 
+%   k: number of multi-step ahead predictions for cross-validation.
 % 
 %   use_parallel: whether to use parallel loops (parfor) to speed up
 %   computations.
@@ -58,34 +60,52 @@ end
 if nargin < 4
     memory = [];
 end
-if nargin < 5 || isempty(use_parallel)
+if nargin < 5 || isempty(k)
+    k = 1;
+end
+if nargin < 6 || isempty(use_parallel)
     use_parallel = 1;
 end
-if nargin < 6 || isempty(test_range)
+if nargin < 7 || isempty(test_range)
     test_range = [0.8 1];
 end
 
 %% Organizing data into separate train and test segments
 [Y_train_cell, Y_test_cell, break_ind, test_ind, N_test_vec, n, N] = tt_decomp(Y, test_range);
-Y_train = cell2mat(cellfun(@(Y)Y(:, 1:end-1), Y_train_cell, 'UniformOutput', 0));
-Y_train_diff = cell2mat(cellfun(@(Y)diff(Y, 1, 2), Y_train_cell, 'UniformOutput', 0));
-Y_test = cell2mat(cellfun(@(Y)Y(:, 1:end-1), Y_test_cell, 'UniformOutput', 0));
-
-%% MMSE prediction
-Y_test_diff_hat = permute(MMSE_est(Y_train', Y_train_diff', Y_test', N_pdf, pdf_weight, memory), [3 1 2]); % Prediction of the derivative (approximated by first difference) of Y_test. The first dimension is predicted-channel, the second dimension is time, and the third dimension is predictor-channel.
-Y_test_plus_hat = Y_test + Y_test_diff_hat;                                 % _plus refers to the fact that each column of Y_test_plus_hat corresponds to one time step later than the corresponding column in Y_test. This is corrected by adding a column of NaNs at the beginning to obtain Y_test_hat.
 
 model.eq = ['$y_i(t) - y_i(t-1) = E[y_i(t) - y_i(t-1) | y_j(t-1)], i,j = 1,\dots,n$ \\ ' ...
     '``model on demand": no explicit form, $y_i(t) - y_i(t-1)$ estimated separately for any given test (query) point $y_j(t-1)$.'];
 
-%% Output arguments
-Y_test_hat = cell2mat(cellfun(@(Y)[nan(n, 1, n), Y], mat2cell(Y_test_plus_hat, n, N_test_vec-1, n), 'UniformOutput', 0));
+runtime.train = 0;
+
+%% Cross-validated k-step ahead prediction
+runtime_test_start = tic;
+
+Y_train = cell2mat(cellfun(@(Y)Y(:, 1:end-1), Y_train_cell, 'UniformOutput', 0));
+Y_train_diff = cell2mat(cellfun(@(Y)diff(Y, 1, 2), Y_train_cell, 'UniformOutput', 0));
+Y_test = cell2mat(cellfun(@(Y)Y(:, 1:end-1), Y_test_cell, 'UniformOutput', 0));
+
+Phi = Y_test;
+for i = 1:k-1
+    Y_test_diff_hat = permute(MMSE_est_nd(permute(Y_train, [2 3 1]), ...
+        permute(Y_train_diff, [2 3 1]), permute(Phi, [2 3 1]), N_pdf, pdf_weight.rel_sigma, ...
+        memory), [3 1 2]);                                                           % Prediction of the derivative (approximated by first difference) of Y_test on a per-channel basis. The pairwise aspect comes in the last (k'th) step of predictions.
+    Y_test_plus_hat = Phi + Y_test_diff_hat;                                 % _plus refers to the fact that each column of Y_test_plus_hat corresponds to one time step later than the corresponding column in Y_test. This is corrected by adding a column of NaNs at the beginning to obtain Y_test_hat.
+    Phi = Y_test_plus_hat(:, 1:end-1);
+end
+Y_test_diff_hat = permute(MMSE_est(Y_train', Y_train_diff', Phi', N_pdf, pdf_weight, memory), [3 1 2]); % Prediction of the derivative (approximated by first difference) of Y_test. The first dimension is predicted-channel, the second dimension is time, and the third dimension is predictor-channel.
+Y_test_plus_hat = Phi + Y_test_diff_hat;                                 % _plus refers to the fact that each column of Y_test_plus_hat corresponds to one time step later than the corresponding column in Y_test. This is corrected by adding a column of NaNs at the beginning to obtain Y_test_hat.
+
+Y_test_hat = cell2mat(cellfun(@(Y)[nan(n, k, n), Y], mat2cell(Y_test_plus_hat, n, N_test_vec-k, n), 'UniformOutput', 0));
 Y_hat = [nan(n, test_ind(1), n), Y_test_hat, nan(n, N-test_ind(end), n)];   % Appending Y_test_hat with NaNs before and after corresponding to training time points.
 if iscell(Y)
     Y_hat = mat2cell(Y_hat, n, diff(break_ind), n);
 end
 
-Y_test_plus = cell2mat(cellfun(@(Y)Y(:, 2:end), Y_test_cell, 'UniformOutput', 0));
+runtime.test = toc(runtime_test_start);
+runtime.total = runtime.train + runtime.test;
+
+Y_test_plus = cell2mat(cellfun(@(Y)Y(:, k+1:end), Y_test_cell, 'UniformOutput', 0));
 E_test = Y_test_plus_hat - Y_test_plus;                                     % Prediction error
 R2 = permute(1 - sum((E_test).^2, 2) ./ sum((Y_test_plus - mean(Y_test_plus, 2)).^2, 2), [1 3 2]); % R2 is a matrix, whose (i, j) entry is the R2 of predicting y_i(t) from y_j(t-1)
 

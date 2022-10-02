@@ -1,4 +1,4 @@
-function main_ieeg(section, ss_factor, varargin)
+function main_ieeg(section, ss_factor, k, varargin)
 %MAIN_IEEG The wrapper code for reproducing the iEEG analyses and graphics
 % reported in the manuscript 
 % E. Nozari et. al., "Is the brain macroscopically linear? A system
@@ -20,6 +20,8 @@ function main_ieeg(section, ss_factor, varargin)
 %   and available in the appropriate directories (see under section ==
 %   'run' for the default directories). This input argument just determines
 %   where to look for the data and how to name the generated files.
+% 
+%   k is the number of multi-step ahead predictions for cross-validation.
 % 
 %   Additional input arguments:
 % 
@@ -61,10 +63,15 @@ listing = struct2cell(dir(segments_address));
 names = listing(1, :)';
 n_segment = nnz(cellfun(@(name)name(1) ~= '.', names));
 
+segment_sel_ratio = 0.1;                                                       % The ratio of subjects used for all the ensuing analyses.
+segments = sort(randperm(n_segment, round(n_segment * segment_sel_ratio)), 'ascend');
+n_segment = numel(segments);
+
+
 switch section
-    case 'submit'                                                                  
+    case 'submit'
         if ~exist('main_data', 'dir')
-            mkdir main_data                                                 
+            mkdir main_data                                                 % Directory to store the created data files. The 'gather' section will later look inside this folder.
         end
         if ~exist('main_data_subspace', 'dir')
             mkdir main_data_subspace
@@ -81,14 +88,19 @@ switch section
             save(['skip_segments_' num2str(ss_factor) '.mat'], 'skip_segments')
         end
         skip_segments = union(skip_segments, nan_segments);
+        if ~exist('error_segments', 'dir')
+            mkdir error_segments                                                 % Directory to store the created data files. The 'gather' section will later look inside this folder.
+        end
+        
+        if ~isempty(varargin)
+            max_jobs = varargin{1};                                         % The maximum number of jobs that should be submitted to the cluster at once or the number of parallel workers to be called if run locally.
+        else
+            max_jobs = inf;
+        end
         
         if run_on_cluster
-            if ~isempty(varargin)
-                max_jobs = varargin{1};                                         
-            else
-                max_jobs = inf;
-            end
-            write_main_sh();                                                    
+            
+            write_main_sh();                                                    % Function to write the shell code main.sh for submitting SGE jobs.
             system('chmod +x main.sh');
             
             if exist('job_id_rec.mat', 'file')
@@ -171,11 +183,11 @@ switch section
             for i_segment = 1:n_segment
                 if ~exist(['main_data/' num2str(i_segment) '.mat'], 'file') ... && 
                         && ~ismember(i_segment, job_id_rec(:, 1)) && ~ismember(i_segment, skip_segments) ... &&
-                        && n_jobs < max_jobs - numel(job_id_active)  
+                        && n_jobs < max_jobs - numel(job_id_active)
                     run_subspace = ~exist(['main_data_subspace/' num2str(i_segment) '_skip'], 'file') ... &&
                         && ~any(crash_segments == i_segment);
                     [~, ~] = system('rm -f /cbica/home/nozarie/.matlab/R2018a/toolbox_cache-9.4.0-3284594471-glnxa64.xml');
-                    [~, cmdout] = system(['qsub ./main.sh ' num2str(ss_factor) ' ' num2str(i_segment) ' ' num2str(run_subspace)]) 
+                    [~, cmdout] = system(['qsub ./main.sh ' num2str(ss_factor) ' ' num2str(k) ' ' num2str(i_segment) ' ' num2str(run_subspace)]) 
                     job_id_rec(end+1, :) = [i_segment, str2double(cmdout(strfind(cmdout, 'Your job ')+(9:15)))];
                     n_jobs = n_jobs + 1;
                 end
@@ -183,14 +195,32 @@ switch section
             
             save job_id_rec.mat job_id_rec
         else
-            for i_segment = setdiff(1:n_segment, skip_segments)
-                run_subspace = ~exist(['main_data_subspace/' num2str(i_segment) '_skip'], 'file');
-                main_ieeg('run', ss_factor, i_segment, run_subspace)
+            hp = gcp('nocreate');
+            if isempty(hp)
+                parpool(max_jobs)
+            elseif hp.NumWorkers ~= max_jobs
+                delete(hp)
+                parpool(max_jobs)
             end
+            parfor_progress(n_segment);
+            parfor i_segment = 1:n_segment
+                if ismember(i_segment, skip_segments) ... ||
+                        || exist(['main_data/' num2str(i_segment) '.mat'], 'file')
+                    continue
+                end
+                run_subspace = ~exist(['main_data_subspace/' num2str(i_segment) '_skip'], 'file');
+                main_ieeg('run', ss_factor, k, i_segment, run_subspace)
+                parfor_progress;
+            end
+            parfor_progress(0);
         end
-    case 'run'                                                                
-        i_segment = varargin{1}
-        run_subspace = varargin{2}
+        
+    case 'run'
+        if ischar(k)
+            k = str2double(k);
+        end
+        i_segment = varargin{1};
+        run_subspace = varargin{2};
         if ischar(i_segment)
             i_segment = str2double(i_segment);
         end
@@ -198,7 +228,7 @@ switch section
             run_subspace = str2double(run_subspace);
         end
         
-        load([segments_address '/Y_' num2str(i_segment) '.mat'], 'Y')
+        load([segments_address '/Y_' num2str(segments(i_segment)) '.mat'], 'Y')
         if any(isnan(Y(:)))
             if exist(['nan_segments_' num2str(ss_factor) '.mat'], 'file')
                 load(['nan_segments_' num2str(ss_factor) '.mat'], 'nan_segments')
@@ -211,31 +241,34 @@ switch section
         else
             try
                 MMSE_memory = -64;
-                [model_summary, R2, runtime, whiteness, ~, Y_hat] = all_methods_ieeg(Y, [], [], run_subspace, i_segment, MMSE_memory);          % Calling the routine that runs all system id methods.
-                save(['main_data/' num2str(i_segment) '.mat'], 'model_summary', 'R2', 'runtime', 'whiteness', 'Y_hat'); 
+                warning('off')
+                [model_summary, R2, runtime, whiteness, ~, Y_hat] = ...
+                    all_methods_ieeg(Y, [], k, [], run_subspace, i_segment, MMSE_memory);          % Calling the routine that runs all system id methods.
+                warning('on')
+                save(['main_data/' num2str(i_segment) '.mat'], 'model_summary', 'R2', 'runtime', 'whiteness', 'Y_hat'); % Saving the data to be used in the subsequent 'gather' section.
             catch ME
                 if isequal(ME.message, 'Input to SVD must not contain NaN or Inf.')
-                    load(['skip_segments_' num2str(ss_factor) '.mat'], 'skip_segments')%, 'note')
+                    load(['skip_segments_' num2str(ss_factor) '.mat'], 'skip_segments')
                     skip_segments(end+1) = i_segment;
                     skip_segments = sort(skip_segments, 'ascend');
-%                     note{end+1} = [num2str(i_segment) ': SVD error thrown by linear_subspace'];
-                    save(['skip_segments_' num2str(ss_factor) '.mat'], 'skip_segments')%, 'note')
+                    save(['skip_segments_' num2str(ss_factor) '.mat'], 'skip_segments')
                 else
                     if ~isequal(ME.identifier, 'MATLAB:license:checkouterror')
                         save(['error_segments/' num2str(i_segment) '.mat'], 'ME')
                     end
-                    rethrow(ME)
+                    warning(['ERROR ENCOUNTERED IN i_segment = ' num2str(i_segment) ' ' repmat('=', 1, 80)])
                 end
             end
         end
-    case 'gather' 
+        
+    case 'gather'
         R2_rec = cell(n_segment, 1);                                        % Cell array for collecting all R^2 vectors from methods.
-        runtime_rec = cell(n_segment, 1);                                      % Same, but for the time that each method takes to run.
-        whiteness_rec = cell(n_segment, 1);                               % Same, but for the vector of p values of chi-squared test of whiteness for each method.
-        segment_done = false(n_segment, 1);                                 
+        runtime_rec = cell(n_segment, 1);                                   % Same, but for the time that each method takes to run.
+        whiteness_rec = cell(n_segment, 1);
+        segment_done = false(n_segment, 1);
         
         for i_segment = 1:n_segment
-            filename = ['main_data/' num2str(i_segment) '.mat'];  
+            filename = ['main_data/' num2str(i_segment) '.mat'];            % The filename that should have been created in call to the 'submit' section.
             if exist(filename, 'file')
                 load(filename, 'R2', 'runtime', 'whiteness')
                 R2_rec{i_segment} = R2;
@@ -246,9 +279,10 @@ switch section
         end
         whiteness_rec = cell2mat(whiteness_rec(segment_done));
         
-        save(['main_data_' num2str(ss_factor) '.mat'], 'R2_rec', 'runtime_rec', 'whiteness_rec', 'n_segment', 'segment_done')
-    case 'plot'                                                                  % Section 3: Plotting the results
-        load(['main_data_' num2str(ss_factor) '.mat'], 'R2_rec', 'runtime_rec', 'whiteness_rec')
+        save(['main_data_' num2str(ss_factor) '_k' num2str(k) '.mat'], 'R2_rec', 'runtime_rec', 'whiteness_rec', 'n_segment', 'segment_done')
+    
+    case 'plot'
+        load(['main_data_' num2str(ss_factor) '_k' num2str(k) '.mat'], 'R2_rec', 'runtime_rec', 'whiteness_rec')
         n_method = size(R2_rec{1}, 2);
         R2_rec_2D = cell2mat(R2_rec);                                       % Flattening R2_rec so that each column contains combined data for all subjects and all brain regions for any given method. Same below.
         whiteness_stat_rec_2D = reshape([whiteness_rec.stat], [], n_method);
@@ -256,7 +290,7 @@ switch section
         whiteness_rel_stat_rec_2D = whiteness_stat_rec_2D ./ whiteness_sig_thr_rec_2D;
         runtime_rec = cell2mat(runtime_rec);
         
-        plot_ind = 1:n_method;                                   % List of methods (not pairwise methods) to including in all plotting below. Uninteresting methods are taken out.
+        plot_ind = 1:n_method;                                              % List of methods to including in all plotting below. Uninteresting methods are taken out.
         n_plot = numel(plot_ind);
         n_lin_method = 5;
         n_nonlin_method = 7;
@@ -273,7 +307,7 @@ switch section
             'DNN\\[-2pt] (CNN)';
             'LSTM\\[-2pt] (IIR)';
             'LSTM\\[-2pt] (FIR)';
-            'MMSE\\[-2pt](scalar)'}; % Labels abbreviating each method
+            'MMSE\\[-2pt](scalar)'};                                        % Labels abbreviating each method
         labels = cellfun(@(label)['\parbox{4.5em}{\centering ' label '}'], labels, 'UniformOutput', 0); % Small modification for better latex rendering
         
         
@@ -297,9 +331,9 @@ switch section
         xlim([0.5 n_plot+0.5])
         grid on
         if ss_factor == 1
-            exportgraphics(hf, 'main_ecog_3_R2.eps')
+            exportgraphics(hf, ['main_ecog_3_R2_k' num2str(k) '.eps'])
         else
-            exportgraphics(hf, ['main_ecog_3_R2_' num2str(ss_factor) '.eps'])
+            exportgraphics(hf, ['main_ecog_3_R2_' num2str(ss_factor) '_k' num2str(k) '.eps'])
         end
         
         figure                                                              % The lower-triangular matrix plot of the p-values from comparison between R^2 distributions
@@ -312,13 +346,13 @@ switch section
         plot_p_cmp(p, labels(plot_ind))
         set(gcf, 'Color', 'w')
         if ss_factor == 1
-            exportgraphics(gcf, 'main_ecog_3_R2_p.eps')
+            exportgraphics(gcf, ['main_ecog_3_R2_p_k' num2str(k) '.eps'])
         else
-            exportgraphics(gcf, ['main_ecog_3_R2_p_' num2str(ss_factor) '.eps'])
+            exportgraphics(gcf, ['main_ecog_3_R2_p_' num2str(ss_factor) '_k' num2str(k) '.eps'])
         end
         
         
-        hf = figure;                                                        % Same as main_3_R2.eps but for p values of chi-squared test of whiteness
+        hf = figure;
         hf.Position(3) = 640;
         boxplot(whiteness_rel_stat_rec_2D(:, plot_ind), 'Whisker', inf, 'Colors', colors(plot_ind, :))
         set(findobj(gcf, 'LineStyle', '-'), 'LineWidth', 3)
@@ -332,12 +366,12 @@ switch section
         grid on
         hf.Color = 'w';
         if ss_factor == 1
-            exportgraphics(hf, 'main_ecog_3_p.eps')
+            exportgraphics(hf, ['main_ecog_3_p_k' num2str(k) '.eps'])
         else
-            exportgraphics(hf, ['main_ecog_3_p_' num2str(ss_factor) '.eps'])
+            exportgraphics(hf, ['main_ecog_3_p_' num2str(ss_factor) '_k' num2str(k) '.eps'])
         end
         
-        figure                                                              % Same as main_3_R2_p.eps but for p values of chi-squared test of whiteness
+        figure
         p = nan(n_plot);
         for i = 1:n_plot
             for j = 1:n_plot
@@ -349,13 +383,13 @@ switch section
         plot_p_cmp(p, labels(plot_ind))
         set(gcf, 'Color', 'w')
         if ss_factor == 1
-            exportgraphics(gcf, 'main_ecog_3_p_p.eps')
+            exportgraphics(gcf, ['main_ecog_3_p_p_k' num2str(k) '.eps'])
         else
-            exportgraphics(gcf, ['main_ecog_3_p_p_' num2str(ss_factor) '.eps'])
+            exportgraphics(gcf, ['main_ecog_3_p_p_' num2str(ss_factor) '_k' num2str(k) '.eps'])
         end
         
         
-        hf = figure;                                                        % Same as main_3_R2.eps but for run times
+        hf = figure;
         hf.Position(3) = 640;
         boxplot(runtime_rec(:, plot_ind), 'Whisker', inf, 'Colors', colors(plot_ind, :))
         set(findobj(gcf, 'LineStyle', '-'), 'LineWidth', 3)
@@ -370,12 +404,12 @@ switch section
         grid on
         hf.Color = 'w';
         if ss_factor == 1
-            exportgraphics(hf, 'main_ecog_3_time.eps')
+            exportgraphics(hf, ['main_ecog_3_time_k' num2str(k) '.eps'])
         else
-            exportgraphics(hf, ['main_ecog_3_time_' num2str(ss_factor) '.eps'])
+            exportgraphics(hf, ['main_ecog_3_time_' num2str(ss_factor) '_k' num2str(k) '.eps'])
         end
         
-        figure                                                              % Same as main_3_R2_p.eps but for run times
+        figure
         p = nan(n_plot);
         for i = 1:n_plot
             for j = 1:n_plot
@@ -385,13 +419,13 @@ switch section
         plot_p_cmp(p, labels(plot_ind))
         set(gcf, 'Color', 'w')
         if ss_factor == 1
-            exportgraphics(gcf, 'main_ecog_3_time_p.eps')
+            exportgraphics(gcf, ['main_ecog_3_time_p_k' num2str(k) '.eps'])
         else
-            exportgraphics(gcf, ['main_ecog_3_time_p_' num2str(ss_factor) '.eps'])
+            exportgraphics(gcf, ['main_ecog_3_time_p_' num2str(ss_factor) '_k' num2str(k) '.eps'])
         end
         
         % Comparison p-values using t-test instead of signrank
-        figure                                                              % The lower-triangular matrix plot of the p-values from comparison between R^2 distributions
+        figure
         p = nan(n_plot);
         for i = 1:n_plot
             for j = 1:n_plot
@@ -401,7 +435,7 @@ switch section
         plot_p_cmp(p, labels(plot_ind))
         exportgraphics(gcf, 'main_ecog_3_R2_p_ttest.eps')
         
-        figure                                                              % Same as main_3_R2_p.eps but for p values of chi-squared test of whiteness
+        figure
         p = nan(n_plot);
         for i = 1:n_plot
             for j = 1:n_plot
@@ -413,7 +447,7 @@ switch section
         plot_p_cmp(p, labels(plot_ind))
         exportgraphics(gcf, 'main_ecog_3_p_p_ttest.eps')
         
-        figure                                                              % Same as main_3_R2_p.eps but for run times
+        figure
         p = nan(n_plot);
         for i = 1:n_plot
             for j = 1:n_plot
@@ -426,13 +460,13 @@ end
 end
 
 %% Auxiliary functions
-function write_main_sh                                                      % This function writes the shell script main.sh to the same directory. This is used for running jobs on a cluster. The main.sh could be directly written, but in this way all the code is accessible from MATLAB. Note that this is unnecessary if the jobs are going to be run locally.
+function write_main_sh                                                 % This function writes the shell script main.sh to the same directory. This is used for running jobs on a cluster. The main.sh could be directly written, but in this way all the code is accessible from MATLAB. Note that this is unnecessary if the jobs are going to be run locally. The shell code run_main_ieeg.sh should already be present in the same directory by running mcc -m main_ieeg.m in MATLAB.
 s = ["#! /bin/bash";
     "#$ -S /bin/bash";
     "#$ -pe threaded 2";
     "#$ -l h_vmem=64G";
     "#$ -l s_vmem=64G";
-    "./run_main_ieeg.sh $MATLAB_DIR run $1 $2 $3"];
+    "./run_main_ieeg.sh $MATLAB_DIR run $1 $2 $3 $4"];
 fileID = fopen('main.sh', 'w');
 fprintf(fileID, '%s\n', s);
 end

@@ -1,4 +1,5 @@
-function [model, R2, whiteness, Y_hat] = nonlinear_manifold(Y, n_AR_lags, kernel, h, scale_h, test_range)
+function [model, R2, whiteness, Y_hat, runtime] = nonlinear_manifold(Y, n_AR_lags, kernel, h, ...
+    scale_h, k, test_range)
 %NONLINEAR_MANIFOLD Fitting and cross-validating a nonlinear model using
 % locally linear approximation of its vector field
 %
@@ -25,6 +26,8 @@ function [model, R2, whiteness, Y_hat] = nonlinear_manifold(Y, n_AR_lags, kernel
 %   original data set over which the value of h has been selected. The
 %   algorithm then adjusts h using the median distance between all pairs of
 %   training and test samples in the current data (Y).
+% 
+%   k: number of multi-step ahead predictions for cross-validation.
 % 
 %   test_range: a sub-interval of [0, 1] indicating the portion of Y that
 %   is used for test (cross-validation). The rest of Y is used for
@@ -75,12 +78,24 @@ end
 if nargin < 5 || isempty(scale_h)
     scale_h.do_scale = false;
 end
-if nargin < 6 || isempty(test_range)
+if nargin < 6 || isempty(k)
+    k = 1;
+end
+if nargin < 7 || isempty(test_range)
     test_range = [0.8 1];
 end
            
 %% Organizing data into separate train and test segments
 [Y_train_cell, Y_test_cell, break_ind, test_ind, N_test_vec, n, N] = tt_decomp(Y, test_range);
+
+model.eq = ['$y(t) - y(t-1) = \theta_0$ \\ ' ...
+    '``model on demand": no explicit form, $\theta_0$ estimated separately for any given test (query) point $(y_i(t-1), y_i(t-2), ..., y_i(t-d))$.'];
+model.d = n_AR_lags;
+
+runtime.train = 0;
+
+%% Cross-validated k-step ahead prediction
+runtime_test_start = tic;
 
 AR_lags = 1:n_AR_lags;
 Y_train_lags = cell2mat(cellfun(@(Y)cell2mat(arrayfun(@(lag)Y(:, 1+n_AR_lags-lag:end-lag), AR_lags', ...
@@ -90,14 +105,11 @@ Y_train = cell2mat(cellfun(@(Y)Y(:, max(1, n_AR_lags):end-1), Y_train_cell, 'Uni
 Y_train_diff = Y_train_plus - Y_train;
 N_train = size(Y_train_lags, 2);
 
-n_additional_AR_lags = n_AR_lags - 1;                                       % This is the number of addtional zeros that need to be added to the beginning of Y_test to allow for one step ahead prediction of time points 2 and onwards.
-Y_test_cell = cellfun(@(Y)[zeros(n, n_additional_AR_lags), Y], Y_test_cell, 'UniformOutput', 0);
-Y_test_lags = cell2mat(cellfun(@(Y)cell2mat(arrayfun(@(lag)Y(:, 1+n_AR_lags-lag:end-lag), AR_lags', ...
+n_add_AR_lags = n_AR_lags - 1;                                       % This is the number of addtional zeros that need to be added to the beginning of Y_test to allow for one step ahead prediction of time points 2 and onwards.
+Y_test_cell = cellfun(@(Y)[zeros(n, n_add_AR_lags), Y], Y_test_cell, 'UniformOutput', 0);
+Y_test_lags = cell2mat(cellfun(@(Y)cell2mat(arrayfun(@(lag)Y(:, n_add_AR_lags+1+1-lag:end-lag), AR_lags', ...
     'UniformOutput', 0)), Y_test_cell, 'UniformOutput', 0));                % Similar to Y_train_lags but for test data. Same below.
-Y_test = cell2mat(cellfun(@(Y)Y(:, max(1, n_AR_lags):end-1), Y_test_cell, 'UniformOutput', 0));
-N_test = size(Y_test_lags, 2);
 
-%% Least squares
 switch kernel
     case 'Gaussian'
         K_h = @(d, h)1/sqrt(2*pi)/h * exp(-d.^2/2/h^2);                        % Window function, giving the weight of each point as a function of its distance d from the testing point of interest.
@@ -109,55 +121,60 @@ if scale_h.do_scale
     h_orig = h;
 end
 
-try
-    Phi = [ones(1, N_train, N_test); Y_train_lags - permute(Y_test_lags, [1 3 2])]; % Matrix of regressors
-    dist = permute(sqrt(sum(Phi(2:end, :, :).^2, 1)), [3 2 1]);                 % Pairwise Euclidean distance
-    if scale_h.do_scale
-        h = h_orig * median(dist(:)) / scale_h.base_med_dist;
-    end
-    K = K_h(dist, h);
-    low_memory = 0;
-catch ME
-    if any(strcmp(ME.identifier, {'MATLAB:array:SizeLimitExceeded', 'MATLAB:nomem'}))
-        low_memory = 1;
-    else
-        throw(ME)
-    end
-end
-
-Theta0 = nan(n, N_test);                                                    % The matrix of parameters. Each slice is for one test point. Within each slice, the first column is the zero'th order Taylor term (at the corresponding test point) and the remaining n x n matrix is the coefficient of the linear Taylor term (which is discarded).
-for i_test = 1:N_test
+low_memory = 0;
+for i = 1:k
+    N_test = size(Y_test_lags, 2);
     if ~low_memory
-        G = Phi(:, :, i_test) * diag(K(i_test, :)) * Phi(:, :, i_test)';
-        g = Y_train_diff * diag(K(i_test, :)) * Phi(:, :, i_test)';
-    else
-        Phi_i_test = [ones(1, N_train); Y_train_lags - Y_test_lags(:, i_test)]; % Matrix of regressors
-        dist_i_test = sqrt(sum(Phi_i_test(2:end, :).^2, 1));                              % Pairwise Euclidean distance
-        if scale_h.do_scale
-            h = h_orig * median(dist_i_test) / scale_h.base_med_dist;
+        try
+            Phi = [ones(1, N_train, N_test); Y_train_lags - permute(Y_test_lags, [1 3 2])]; % Matrix of regressors
+            dist = permute(sqrt(sum(Phi(2:end, :, :).^2, 1)), [3 2 1]);                 % Pairwise Euclidean distance
+            if scale_h.do_scale
+                h = h_orig * median(dist(:)) / scale_h.base_med_dist;
+            end
+            K = K_h(dist, h);
+            low_memory = 0;
+        catch ME
+            if any(strcmp(ME.identifier, {'MATLAB:array:SizeLimitExceeded', 'MATLAB:nomem'}))
+                low_memory = 1;
+            else
+                throw(ME)
+            end
         end
-        K_i_test = K_h(dist_i_test, h);
-        G = Phi_i_test * diag(K_i_test) * Phi_i_test';
-        g = Y_train_diff * diag(K_i_test) * Phi_i_test';
     end
-    theta = g * pinv(G);
-    Theta0(:, i_test) = theta(:, 1);
+
+    Theta0 = nan(n, N_test);                                                    % The matrix of parameters. Each slice is for one test point. Within each slice, the first column is the zero'th order Taylor term (at the corresponding test point) and the remaining n x n matrix is the coefficient of the linear Taylor term (which is discarded).
+    for i_test = 1:N_test
+        if ~low_memory
+            G = Phi(:, :, i_test) * diag(K(i_test, :)) * Phi(:, :, i_test)';
+            g = Y_train_diff * diag(K(i_test, :)) * Phi(:, :, i_test)';
+        else
+            Phi_i_test = [ones(1, N_train); Y_train_lags - Y_test_lags(:, i_test)]; % Matrix of regressors
+            dist_i_test = sqrt(sum(Phi_i_test(2:end, :).^2, 1));                              % Pairwise Euclidean distance
+            if scale_h.do_scale
+                h = h_orig * median(dist_i_test) / scale_h.base_med_dist;
+            end
+            K_i_test = K_h(dist_i_test, h);
+            G = Phi_i_test * diag(K_i_test) * Phi_i_test';
+            g = Y_train_diff * diag(K_i_test) * Phi_i_test';
+        end
+        theta = g * pinv(G);
+        Theta0(:, i_test) = theta(:, 1);
+    end
+    Y_test_plus_hat = Y_test_lags(1:n, :) + Theta0;                                          % _plus refers to the fact that each column of Y_test_plus_hat corresponds to one time step later than the corresponding column in Y_test. This is corrected by adding a column of NaNs at the beginning to obtain Y_test_hat.
+    
+    Y_test_lags = [Y_test_plus_hat(:, 1:end-1); Y_test_lags(1:end-n, 1:end-1)];
 end
-                
-model.eq = ['$y(t) - y(t-1) = \theta_0$ \\ ' ...
-    '``model on demand": no explicit form, $\theta_0$ estimated separately for any given test (query) point.'];
-model.theta_0 = Theta0;
 
-%% Cross-validated one step ahead prediction
-Y_test_plus_hat = Y_test + Theta0;                                          % _plus refers to the fact that each column of Y_test_plus_hat corresponds to one time step later than the corresponding column in Y_test. This is corrected by adding a column of NaNs at the beginning to obtain Y_test_hat.
-
-Y_test_hat = cell2mat(cellfun(@(Y)[nan(n, 1), Y], mat2cell(Y_test_plus_hat, n, N_test_vec-1), 'UniformOutput', 0));
+Y_test_hat = cell2mat(cellfun(@(Y)[nan(n, k), Y], mat2cell(Y_test_plus_hat, n, N_test_vec-k), 'UniformOutput', 0));
 Y_hat = [nan(n, test_ind(1)), Y_test_hat, nan(n, N-test_ind(end))];         % Appending Y_test_hat with NaNs before and after corresponding to training time points.
 if iscell(Y)
     Y_hat = mat2cell(Y_hat, n, diff(break_ind));
 end
 
-Y_test_plus = cell2mat(cellfun(@(Y)Y(:, 1+max(1, n_AR_lags):end), Y_test_cell, 'UniformOutput', 0));
+runtime.test = toc(runtime_test_start);
+runtime.total = runtime.train + runtime.test;
+
+Y_test_plus = cell2mat(cellfun(@(Y)Y(:, n_add_AR_lags+k+1:end), Y_test_cell, 'UniformOutput', 0));
 E_test = Y_test_plus_hat - Y_test_plus;                                     % Prediction error
 R2 = 1 - sum(E_test.^2, 2) ./ sum((Y_test_plus - mean(Y_test_plus, 2)).^2, 2);
 [whiteness.p, whiteness.stat, whiteness.sig_thr] = my_whitetest_multivar(E_test);

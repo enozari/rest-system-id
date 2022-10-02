@@ -1,5 +1,5 @@
-function [model, R2, whiteness, Y_hat] = nonlinear_LSTM(Y, rec_layer, n_AR_lags, ...
-    hidden_width, exe_env, learn_rate, test_range)
+function [model, R2, whiteness, Y_hat, runtime] = nonlinear_LSTM(Y, rec_layer, n_AR_lags, ...
+    hidden_width, exe_env, learn_rate, k, test_range)
 %NONLINEAR_LSTM Fitting and cross-validating a nonlinear model using
 % LSTM/GRU neural networks.
 %
@@ -25,6 +25,8 @@ function [model, R2, whiteness, Y_hat] = nonlinear_LSTM(Y, rec_layer, n_AR_lags,
 %   or 'parallel'. See documentation for trainingOptions for details.
 % 
 %   learn_rate: the initial learning rate.
+% 
+%   k: number of multi-step ahead predictions for cross-validation.
 % 
 %   test_range: a sub-interval of [0, 1] indicating the portion of Y that
 %   is used for test (cross-validation). The rest of Y is used for
@@ -53,11 +55,11 @@ function [model, R2, whiteness, Y_hat] = nonlinear_LSTM(Y, rec_layer, n_AR_lags,
 %   Copyright (C) 2021, Erfan Nozari
 %   All rights reserved.
 
-if nargin < 2 || isempty(n_AR_lags)
-    n_AR_lags = nan;
-end
-if nargin < 3 || isempty(rec_layer)
+if nargin < 2 || isempty(rec_layer)
     rec_layer = 'lstm';
+end
+if nargin < 3 || isempty(n_AR_lags)
+    n_AR_lags = nan;
 end
 if nargin < 4 || isempty(hidden_width)
     hidden_width = 10;
@@ -68,12 +70,18 @@ end
 if nargin < 6 || isempty(learn_rate)
     learn_rate = 0.005;
 end
-if nargin < 7 || isempty(test_range)
+if nargin < 7 || isempty(k)
+    k = 1;
+end
+if nargin < 8 || isempty(test_range)
     test_range = [0.8 1];
 end
 
 %% Organizing data into separate train and test segments
 [Y_train_cell, Y_test_cell, break_ind, test_ind, N_test_vec, n, N] = tt_decomp(Y, test_range);
+
+runtime_train_start = tic;
+
 n_test = numel(Y_test_cell);
 mu = mean(cell2mat(Y_train_cell), 2);
 sigma = std(cell2mat(Y_train_cell), [], 2);
@@ -139,41 +147,60 @@ else
     model.f = net;
 end
 
-%% Cross-validated one step ahead prediction
+runtime.train = toc(runtime_train_start);
+
+%% Cross-validated k-step ahead prediction
+runtime_test_start = tic;
+
 Y_test_norm_hat_cell = cellfun(@(Y)nan(size(Y)), Y_test_norm_cell, 'UniformOutput', 0);
 if isnan(n_AR_lags)    
     for i_test = 1:n_test
-        net = rebootState(net, Y_train_norm_0_cell, exe_env);
-        for t = 2:N_test_vec(i_test)
-            [net, Y_test_norm_diff_hat] = predictAndUpdateState(net, ...
-                Y_test_norm_cell{i_test}(:, t-1), 'ExecutionEnvironment', exe_env, ...
-                'MiniBatchSize', 1);
-            Y_test_norm_hat_cell{i_test}(:, t) = Y_test_norm_cell{i_test}(:, t-1) ... +
-                + Y_test_norm_diff_hat;
+        for t = k+1:N_test_vec(i_test)
+            net = rebootState(net, Y_train_norm_0_cell, exe_env);
+            for tau = 1:t-k
+                [net, Y_test_norm_diff_hat] = predictAndUpdateState(net, ...
+                    Y_test_norm_cell{i_test}(:, tau), 'ExecutionEnvironment', exe_env, ...
+                    'MiniBatchSize', 1);
+            end
+            Y_test_norm_hat_tau = Y_test_norm_cell{i_test}(:, tau) + Y_test_norm_diff_hat;
+            for tau = t-k+1:t-1
+                [net, Y_test_norm_diff_hat] = predictAndUpdateState(net, ...
+                    Y_test_norm_hat_tau, 'ExecutionEnvironment', exe_env, ...
+                    'MiniBatchSize', 1);
+                Y_test_norm_hat_tau = Y_test_norm_hat_tau + Y_test_norm_diff_hat;
+            end
+                Y_test_norm_hat_cell{i_test}(:, t) = Y_test_norm_hat_tau;
         end
     end
 else
-    Y_test_norm_cell = cellfun(@(Y)[zeros(n, n_AR_lags-1) Y], Y_test_norm_cell, 'UniformOutput', 0);
+    n_add_AR_lags = n_AR_lags - 1;
+    Y_test_norm_cell = cellfun(@(Y)[zeros(n, n_add_AR_lags) Y], Y_test_norm_cell, 'UniformOutput', 0);
     for i_test = 1:n_test
-        for t = 2:N_test_vec(i_test)
+        for t = k+1:N_test_vec(i_test)
             net = resetState(net);
-            [net, Y_test_norm_diff_hat] = predictAndUpdateState(net, ...
-                Y_test_norm_cell{i_test}(:, (t-n_AR_lags:t-1)+n_AR_lags-1), ...
-                'ExecutionEnvironment', exe_env, 'MiniBatchSize', 1);
-            Y_test_norm_hat_cell{i_test}(:, t) = Y_test_norm_cell{i_test}(:, t-1+n_AR_lags-1) ... +
-                + Y_test_norm_diff_hat';
+            Phi = Y_test_norm_cell{i_test}(:, n_add_AR_lags+(t-k-n_AR_lags+1:t-k));
+            for i = 1:k
+                [net, Y_test_norm_diff_hat] = predictAndUpdateState(net, ...
+                    Phi, 'ExecutionEnvironment', exe_env, 'MiniBatchSize', 1);
+                Y_test_norm_hat = Phi(:, end) + Y_test_norm_diff_hat';
+                Phi = [Phi(:, 2:end), Y_test_norm_hat];
+            end
+            Y_test_norm_hat_cell{i_test}(:, t) = Y_test_norm_hat;
         end
     end
 end
 
 Y_test_hat_cell = cellfun(@(Y)sigma .* Y + mu, Y_test_norm_hat_cell, 'UniformOutput', 0);
-Y_test_plus_hat = cell2mat(cellfun(@(Y)Y(:, 2:end), Y_test_hat_cell, 'UniformOutput', 0));
-Y_test_plus = cell2mat(cellfun(@(Y)Y(:, 2:end), Y_test_cell, 'UniformOutput', 0));
+Y_test_plus_hat = cell2mat(cellfun(@(Y)Y(:, k+1:end), Y_test_hat_cell, 'UniformOutput', 0));
+Y_test_plus = cell2mat(cellfun(@(Y)Y(:, k+1:end), Y_test_cell, 'UniformOutput', 0));
 
 Y_hat = [nan(n, test_ind(1)), cell2mat(Y_test_hat_cell), nan(n, N-test_ind(end))];         % Appending Y_test_hat with NaNs before and after corresponding to training time points.
 if iscell(Y)
     Y_hat = mat2cell(Y_hat, n, diff(break_ind));
 end
+
+runtime.test = toc(runtime_test_start);
+runtime.total = runtime.train + runtime.test;
 
 E_test = Y_test_plus_hat - Y_test_plus;                                     % Prediction error
 R2 = 1 - sum(E_test.^2, 2) ./ sum((Y_test_plus - mean(Y_test_plus, 2)).^2, 2);

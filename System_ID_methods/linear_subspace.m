@@ -1,4 +1,4 @@
-function [model, R2, whiteness, Y_hat] = linear_subspace(Y, s, r, n, test_range)
+function [model, R2, whiteness, Y_hat, runtime] = linear_subspace(Y, s, r, n, k, test_range)
 %LINEAR_SUBSPACE Fitting and cross-validating a general linear model in
 % standard state space form using subspace methods. 
 % 
@@ -22,6 +22,8 @@ function [model, R2, whiteness, Y_hat] = linear_subspace(Y, s, r, n, test_range)
 % 
 %   n: the dimension of the internal state space that is expected from the
 %   model.
+% 
+%   k: number of multi-step ahead predictions for cross-validation
 % 
 %   test_range: a sub-interval of [0, 1] indicating the portion of Y that
 %   is used for test (cross-validation). The rest of Y is used for
@@ -59,7 +61,10 @@ end
 if nargin < 4 || isempty(n)
     n = 450;
 end
-if nargin < 5 || isempty(test_range)
+if nargin < 5 || isempty(k)
+    k = 1;
+end
+if nargin < 6 || isempty(test_range)
     test_range = [0.8 1];
 end
 
@@ -67,6 +72,8 @@ end
 [Y_train_cell, Y_test_cell, break_ind, test_ind, N_test_vec, p, N] = tt_decomp(Y, test_range);
 
 %% Estimation of the state-space matrices
+runtime_train_start = tic;
+
 n_train = numel(Y_train_cell);
 G_hat_cell = cell(1, n_train);
 Y_train_hankel_cell = cell(1, n_train);
@@ -124,7 +131,11 @@ model.Q = Qcov;
 model.M = Mcov;
 model.R = Rcov;
 
-%% Cross-validated one step ahead prediction. At any time t, this is achieved via a standard Kalman predictor using output data from the first time point until time t-1.
+runtime.train = toc(runtime_train_start);
+
+%% Cross-validated k-step ahead prediction. At any time t, this is achieved via a standard Kalman predictor using output data from the first time point until time t-1.
+runtime_test_start = tic;
+
 n_test = numel(Y_test_cell);
 Y_test_hat = cell(1, n_test);                                               % The prediction of Y_test_cell
 A_hat_mod = A_hat - Mcov * (Rcov \ C_hat);
@@ -132,31 +143,48 @@ Rcov_mod = Mcov * (Rcov \ Mcov');
 for i_test = 1:n_test
     Y_test = Y_test_cell{i_test};
     N_test = N_test_vec(i_test);
-    X_test_hat_pred = nan(n, N_test);                                       % Predicted state
+    X_test_hat_pred_1 = nan(n, N_test);                                     % Predicted state
     X_test_hat = nan(n, N_test);                                            % Filtered state
     X_test_hat(:, 1) = 0;
     P_hat_pred = nan(n, n, N_test);                                         % Predicted state covariance
     P_hat = nan(n, n, N_test);                                              % Filtered state covariance
     P_hat(:, :, 1) = eye(n);
     for t = 1:N_test-1
-        X_test_hat_pred(:, t+1) = A_hat_mod * X_test_hat(:, t) + Mcov * (Rcov \ Y_test(:, t));
+        X_test_hat_pred_1(:, t+1) = A_hat_mod * X_test_hat(:, t) + Mcov * (Rcov \ Y_test(:, t));
         P_hat_pred(:, :, t+1) = A_hat_mod * P_hat(:, :, t) * A_hat_mod' + Qcov - Rcov_mod;
-        X_test_hat(:, t+1) = X_test_hat_pred(:, t+1) + P_hat_pred(:, :, t+1) * C_hat' ... *
-            * ((C_hat * P_hat_pred(:, :, t+1) * C_hat' + Rcov) \ (Y_test(:, t+1) - C_hat * X_test_hat_pred(:, t+1)));
+        X_test_hat(:, t+1) = X_test_hat_pred_1(:, t+1) + P_hat_pred(:, :, t+1) * C_hat' ... *
+            * ((C_hat * P_hat_pred(:, :, t+1) * C_hat' + Rcov) \ (Y_test(:, t+1) - C_hat * X_test_hat_pred_1(:, t+1)));
         P_hat(:, :, t+1) = P_hat_pred(:, :, t+1) - P_hat_pred(:, :, t+1) * C_hat' ... *
             * ((C_hat * P_hat_pred(:, :, t+1) * C_hat' + Rcov) \ (C_hat * P_hat_pred(:, :, t+1)));
     end
-    Y_test_hat{i_test} = C_hat * X_test_hat_pred;
+    Y_test_hat_i_test_k = cell(k, 1);
+    Y_test_hat_i_test_k{1} = C_hat * X_test_hat_pred_1;
+    for i = 2:k
+        X_test_hat_pred_i = nan(n, N_test);
+        for t = i+1:N_test
+            X_test_hat_pred_i(:, t) = X_test_hat_pred_1(:, t-i+1);
+            for j = 2:i
+                X_test_hat_pred_i(:, t) = A_hat_mod * X_test_hat_pred_i(:, t) ... +
+                    + Mcov * (Rcov \ Y_test_hat_i_test_k{j-1}(:, t-i+j));   % Uncorrected (open-loop) predictions starting from the 1-step prediction at time t-i+1.
+            end
+        end
+        Y_test_hat_i_test_k{i} = C_hat * X_test_hat_pred_i;
+    end
+    Y_test_hat{i_test} = Y_test_hat_i_test_k{k};
 end
 
 Y_test_full = cell2mat(Y_test_cell);
 Y_test_hat_full = cell2mat(Y_test_hat);
-nan_ind = any(isnan(Y_test_hat_full));
-E2_test = Y_test_hat_full(:, ~nan_ind) - Y_test_full(:, ~nan_ind);          % Prediction error
-R2 = 1 - sum(E2_test.^2, 2) ./ sum((Y_test_full(:, ~nan_ind) - mean(Y_test_full(:, ~nan_ind), 2)).^2, 2);
-[whiteness.p, whiteness.stat, whiteness.sig_thr] = my_whitetest_multivar(E2_test);
 
 Y_hat = [nan(p, test_ind(1)), Y_test_hat_full, nan(p, N-test_ind(end))];     % Appending Y_test_hat with NaNs before and after corresponding to training time points.
 if iscell(Y)
     Y_hat = mat2cell(Y_hat, p, diff(break_ind));
 end
+
+runtime.test = toc(runtime_test_start);
+runtime.total = runtime.train + runtime.test;
+
+nan_ind = any(isnan(Y_test_hat_full));
+E2_test = Y_test_hat_full(:, ~nan_ind) - Y_test_full(:, ~nan_ind);          % Prediction error
+R2 = 1 - sum(E2_test.^2, 2) ./ sum((Y_test_full(:, ~nan_ind) - mean(Y_test_full(:, ~nan_ind), 2)).^2, 2);
+[whiteness.p, whiteness.stat, whiteness.sig_thr] = my_whitetest_multivar(E2_test);

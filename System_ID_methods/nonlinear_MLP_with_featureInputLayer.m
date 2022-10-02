@@ -1,5 +1,5 @@
-function [model, R2, whiteness, Y_hat, runtime] = nonlinear_MLP(Y, n_AR_lags, hidden_width, hidden_depth, dropout_prob, ...
-    exe_env, learn_rate, lambda, k, test_range)
+function [model, R2, whiteness, Y_hat] = nonlinear_MLP(Y, n_AR_lags, hidden_width, hidden_depth, dropout_prob, ...
+    exe_env, test_range)
 %NONLINEAR_MLP Fitting and cross-validating a nonlinear model using ReLU
 % MLP deep neural networks.
 %
@@ -25,10 +25,6 @@ function [model, R2, whiteness, Y_hat, runtime] = nonlinear_MLP(Y, n_AR_lags, hi
 %   trainNetwork function. Options are 'auto', 'cpu', 'gpu', 'multi-gpu',
 %   or 'parallel'. See documentation for trainingOptions for details.
 % 
-%   learn_rate: the initial learning rate.
-% 
-%   k: number of multi-step ahead predictions for cross-validation.
-% 
 %   test_range: a sub-interval of [0, 1] indicating the portion of Y that
 %   is used for test (cross-validation). The rest of Y is used for
 %   training.
@@ -41,9 +37,8 @@ function [model, R2, whiteness, Y_hat, runtime] = nonlinear_MLP(Y, n_AR_lags, hi
 %   R2: an n x 1 vector containing the cross-validated prediction R^2 of
 %   the n channels.
 % 
-%   whiteness: a struct containing the statistic (Q) and the
-%   randomization-basd significance threshold and p-value of the
-%   multivariate whiteness test.
+%   whiteness_p: an n x 1 vector containing the p-values of the chi-squared
+%   test of whiteness for the cross-validated residuals of each channel.
 % 
 %   Y_hat: a cell array the same size as Y but for cross-validated one-step
 %   ahead predictions using the fitted model. This is only meaningful for
@@ -53,7 +48,7 @@ function [model, R2, whiteness, Y_hat, runtime] = nonlinear_MLP(Y, n_AR_lags, hi
 %   data is available. Therefore, the first column of all elements of Y_hat
 %   are also NaNs, regardless of being a training or a test time point.
 % 
-%   Copyright (C) 2021, Erfan Nozari
+%   Copyright (C) 2020, Erfan Nozari
 %   All rights reserved.
 
 if nargin < 2 || isempty(n_AR_lags)
@@ -71,24 +66,12 @@ end
 if nargin < 6 || isempty(exe_env)
     exe_env = 'auto';
 end
-if nargin < 7 || isempty(learn_rate)
-    learn_rate = 1e-3;
-end
-if nargin < 8 || isempty(lambda)
-    lambda = 1e-4;
-end
-if nargin < 9 || isempty(k)
-    k = 1;
-end
-if nargin < 10 || isempty(test_range)
+if nargin < 7 || isempty(test_range)
     test_range = [0.8 1];
 end
 
 %% Organizing data into separate train and test segments
 [Y_train_cell, Y_test_cell, break_ind, test_ind, N_test_vec, n, N] = tt_decomp(Y, test_range);
-
-runtime_train_start = tic;
-
 mu = mean(cell2mat(Y_train_cell), 2);
 sigma = std(cell2mat(Y_train_cell), [], 2);
 Y_train_norm_cell = cellfun(@(Y)(Y - mu) ./ sigma, Y_train_cell, 'UniformOutput', 0);
@@ -103,71 +86,61 @@ Y_train_norm_diff = Y_train_norm_plus - Y_train_norm;
 N_train = size(Y_train_norm_lags, 2);
 
 %% Constructing and training the network
-layers = imageInputLayer([1 1 n*n_AR_lags]);
+layers = featureInputLayer(n*n_AR_lags);
 for i = 1:hidden_depth
-    layers = [layers, ...
-        fullyConnectedLayer(hidden_width), ...
-        batchNormalizationLayer, ...
-        reluLayer, ...
-        dropoutLayer(dropout_prob), ...
-        ];
+    layers = [layers, fullyConnectedLayer(hidden_width), batchNormalizationLayer, reluLayer, ...
+        dropoutLayer(dropout_prob)];
 end
 layers = [layers, fullyConnectedLayer(n), regressionLayer];
 
-options = trainingOptions('sgdm', ...
-    'MaxEpochs', 100, ...
-    'InitialLearnRate', learn_rate, ...
+fixedTrainingOptions = {'sgdm', ...
     'MiniBatchSize', round(N_train/10), ...
     'LearnRateSchedule', 'piecewise', ...
     'LearnRateDropFactor', 0.9, ...
     'LearnRateDropPeriod', 20, ...
     'Shuffle', 'every-epoch', ...
-    'L2regularization', lambda, ...
     'Plots', 'none', ...
     'ExecutionEnvironment', exe_env, ...
-    'Verbose', false);
-
-net = trainNetwork(permute(Y_train_norm_lags, [3 4 1 2]), Y_train_norm_diff', layers, options);
+    'Verbose', false};
+InitialLearnRate = 1e-3;
+while 1
+    options = trainingOptions(fixedTrainingOptions{:}, ...
+        'MaxEpochs', 3, ...
+        'InitialLearnRate', InitialLearnRate);
+    net = trainNetwork(Y_train_norm_lags', Y_train_norm_diff', layers, options);
+    if any(arrayfun(@(i)any(isnan(net.Layers(i).Weights(:))), 2:4:4*(hidden_depth+1)))
+        InitialLearnRate = InitialLearnRate * 0.1;
+    else
+        break
+    end
+end
+options = trainingOptions(fixedTrainingOptions{:}, ...
+    'MaxEpochs', 100, ...
+    'InitialLearnRate', InitialLearnRate);
+net = trainNetwork(Y_train_norm_lags', Y_train_norm_diff', layers, options);
     
 model.eq = ['$y(t) - y(t-1) = f(y(t-1)) + e(t)$ \\ ' ...
     'f(\cdot) is a deep MLP neural network.'];
 model.f = net;
 
-runtime.train = toc(runtime_train_start);
-
-%% Cross-validated k-step ahead prediction
-runtime_test_start = tic;
-
-n_add_AR_lags = n_AR_lags - 1;                                       % This is the number of addtional zeros that need to be added to the beginning of Y_test to allow for one step ahead prediction of time points 2 and onwards.
-Y_test_norm_cell = cellfun(@(Y)[zeros(n, n_add_AR_lags), Y], Y_test_norm_cell, 'UniformOutput', 0);
-Y_test_norm_lags = cell2mat(cellfun(@(Y)cell2mat(arrayfun(@(lag)Y(:, n_add_AR_lags+1+1-lag:end-lag), AR_lags', ...
+%% Cross-validated one step ahead prediction
+n_additional_AR_lags = n_AR_lags - 1;                                       % This is the number of addtional zeros that need to be added to the beginning of Y_test to allow for one step ahead prediction of time points 2 and onwards.
+Y_test_norm_cell = cellfun(@(Y)[zeros(n, n_additional_AR_lags), Y], Y_test_norm_cell, 'UniformOutput', 0);
+Y_test_norm_lags = cell2mat(cellfun(@(Y)cell2mat(arrayfun(@(lag)Y(:, 1+n_AR_lags-lag:end-lag), AR_lags', ...
     'UniformOutput', 0)), Y_test_norm_cell, 'UniformOutput', 0));                % Similar to Y_train_lags but for test data. Same below.
-Y_test_norm = cell2mat(cellfun(@(Y)Y(:, n_add_AR_lags+1:end-1), Y_test_norm_cell, 'UniformOutput', 0));
+Y_test_norm = cell2mat(cellfun(@(Y)Y(:, max(1, n_AR_lags):end-1), Y_test_norm_cell, 'UniformOutput', 0));
 
-Phi = Y_test_norm_lags;
-Y_test_norm_diff_hat = predict(net, permute(Phi, [3 4 1 2]), 'ExecutionEnvironment', exe_env)'; % DNN's prediction of the derivative (approximated by first difference) of Y_test
+Y_test_norm_diff_hat = predict(net, Y_test_norm_lags', 'ExecutionEnvironment', exe_env)'; % DNN's prediction of the derivative (approximated by first difference) of Y_test
 Y_test_norm_plus_hat = Y_test_norm + Y_test_norm_diff_hat;                                 % _plus refers to the fact that each column of Y_test_plus_hat corresponds to one time step later than the corresponding column in Y_test. This is corrected by adding a column of NaNs at the beginning to obtain Y_test_hat.
-for i = 2:k
-    Phi = [Y_test_norm_plus_hat(:, 1:end-1); Phi(1:end-n, 1:end-1)];
-    Y_test_norm_diff_hat = predict(net, permute(Phi, [3 4 1 2]), 'ExecutionEnvironment', exe_env)'; % DNN's prediction of the derivative (approximated by first difference) of Y_test
-    Y_test_norm_plus_hat = Y_test_norm_plus_hat(:, 1:end-1) + Y_test_norm_diff_hat;                                 % _plus refers to the fact that each column of Y_test_plus_hat corresponds to one time step later than the corresponding column in Y_test. This is corrected by adding a column of NaNs at the beginning to obtain Y_test_hat.
-end
 Y_test_plus_hat = sigma .* Y_test_norm_plus_hat + mu;
-Y_test_hat = cell2mat(cellfun(@(Y)[nan(n, k), Y], mat2cell(Y_test_plus_hat, n, N_test_vec-k), 'UniformOutput', 0));
+Y_test_hat = cell2mat(cellfun(@(Y)[nan(n, 1), Y], mat2cell(Y_test_plus_hat, n, N_test_vec-1), 'UniformOutput', 0));
 
 Y_hat = [nan(n, test_ind(1)), Y_test_hat, nan(n, N-test_ind(end))];         % Appending Y_test_hat with NaNs before and after corresponding to training time points.
 if iscell(Y)
     Y_hat = mat2cell(Y_hat, n, diff(break_ind));
 end
 
-runtime.test = toc(runtime_test_start);
-runtime.total = runtime.train + runtime.test;
-
-Y_test_plus = cell2mat(cellfun(@(Y)Y(:, k+1:end), Y_test_cell, 'UniformOutput', 0));
+Y_test_plus = cell2mat(cellfun(@(Y)Y(:, 2:end), Y_test_cell, 'UniformOutput', 0));
 E_test = Y_test_plus_hat - Y_test_plus;                                     % Prediction error
 R2 = 1 - sum(E_test.^2, 2) ./ sum((Y_test_plus - mean(Y_test_plus, 2)).^2, 2);
-try
-    [whiteness.p, whiteness.stat, whiteness.sig_thr] = my_whitetest_multivar(E_test);
-catch
-    [whiteness.p, whiteness.stat, whiteness.sig_thr] = deal(nan);
-end
+[whiteness.p, whiteness.stat, whiteness.sig_thr] = my_whitetest_multivar(E_test);
